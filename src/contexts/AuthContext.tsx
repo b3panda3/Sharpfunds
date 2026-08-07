@@ -1,0 +1,223 @@
+import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
+import { supabase } from "../lib/supabase";
+import type { AssetClass, UserProfile, OnboardingAnswers } from "../types";
+
+interface AuthContextType {
+  user: UserProfile | null;
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  isInitializing: boolean;
+  login: (email: string, password: string) => Promise<void>;
+  loginWithGoogle: () => Promise<void>;
+  logout: () => Promise<void>;
+  signup: (email: string, password: string, displayName: string) => Promise<void>;
+  updateProfile: (updates: Partial<UserProfile>) => Promise<void>;
+  completeOnboarding: (answers: OnboardingAnswers) => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextType | null>(null);
+
+function mapDbProfileToUserProfile(row: Record<string, unknown>): UserProfile {
+  return {
+    id: row.id as string,
+    email: (row.email as string) ?? "",
+    displayName: (row.display_name as string) ?? "",
+    avatarUrl: row.avatar_url as string | undefined,
+    assetClasses: (row.asset_classes as AssetClass[]) ?? [],
+    riskTolerance: (row.risk_tolerance as UserProfile["riskTolerance"]) ?? "balanced",
+    experienceLevel: (row.experience_level as UserProfile["experienceLevel"]) ?? "intermediate",
+    onboardingComplete: (row.onboarding_complete as boolean) ?? false,
+    createdAt: (row.created_at as string) ?? new Date().toISOString(),
+  };
+}
+
+async function fetchProfile(userId: string): Promise<UserProfile | null> {
+  const { data, error } = await supabase
+    .from("user_profiles")
+    .select("*")
+    .eq("id", userId)
+    .single();
+
+  if (error || !data) return null;
+  return mapDbProfileToUserProfile(data);
+}
+
+async function upsertProfile(profile: Partial<UserProfile> & { id: string }): Promise<void> {
+  const { error } = await supabase.from("user_profiles").upsert(
+    {
+      id: profile.id,
+      email: profile.email,
+      display_name: profile.displayName,
+      avatar_url: profile.avatarUrl,
+      asset_classes: profile.assetClasses ?? [],
+      risk_tolerance: profile.riskTolerance ?? "balanced",
+      experience_level: profile.experienceLevel ?? "intermediate",
+      onboarding_complete: profile.onboardingComplete ?? false,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "id" }
+  );
+  if (error) throw new Error(error.message);
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
+
+  // On mount: restore session from localStorage
+  useEffect(() => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (session?.user) {
+        const profile = await fetchProfile(session.user.id);
+        if (profile) {
+          setUser(profile);
+        } else {
+          // Profile not yet created (trigger hasn't run) — create it now
+          const newProfile: UserProfile = {
+            id: session.user.id,
+            email: session.user.email ?? "",
+            displayName: session.user.user_metadata?.full_name ?? session.user.email?.split("@")[0] ?? "User",
+            avatarUrl: session.user.user_metadata?.avatar_url,
+            assetClasses: [],
+            riskTolerance: "balanced",
+            experienceLevel: "intermediate",
+            onboardingComplete: false,
+            createdAt: new Date().toISOString(),
+          };
+          await upsertProfile(newProfile);
+          setUser(newProfile);
+        }
+      }
+      setIsInitializing(false);
+    });
+
+    // Listen for auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (event === "SIGNED_IN" && session?.user) {
+          const profile = await fetchProfile(session.user.id);
+          if (profile) setUser(profile);
+        } else if (event === "SIGNED_OUT") {
+          setUser(null);
+        } else if (event === "TOKEN_REFRESHED" && session?.user) {
+          const profile = await fetchProfile(session.user.id);
+          if (profile) setUser(profile);
+        }
+      }
+    );
+
+    return () => subscription?.unsubscribe();
+  }, []);
+
+  const login = useCallback(async (email: string, password: string) => {
+    setIsLoading(true);
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw new Error(error.message);
+      // onAuthStateChange will set the user
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const loginWithGoogle = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: `${window.location.origin}/dashboard`,
+        },
+      });
+      if (error) throw new Error(error.message);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const logout = useCallback(async () => {
+    await supabase.auth.signOut();
+    // onAuthStateChange clears the user
+  }, []);
+
+  const signup = useCallback(
+    async (email: string, password: string, displayName: string) => {
+      setIsLoading(true);
+      try {
+        const { error, data } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: { full_name: displayName },
+          },
+        });
+        if (error) throw new Error(error.message);
+
+        if (data.user) {
+          // Create profile immediately
+          const newProfile: UserProfile = {
+            id: data.user.id,
+            email: data.user.email ?? email,
+            displayName,
+            assetClasses: [],
+            riskTolerance: "balanced",
+            experienceLevel: "intermediate",
+            onboardingComplete: false,
+            createdAt: new Date().toISOString(),
+          };
+          await upsertProfile(newProfile);
+          setUser(newProfile);
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    []
+  );
+
+  const updateProfile = useCallback(async (updates: Partial<UserProfile>) => {
+    if (!user) return;
+    const merged = { ...user, ...updates };
+    await upsertProfile(merged);
+    setUser(merged);
+  }, [user]);
+
+  const completeOnboarding = useCallback(async (answers: OnboardingAnswers) => {
+    if (!user) return;
+    const updated: UserProfile = {
+      ...user,
+      assetClasses: answers.assetClasses,
+      riskTolerance: answers.riskTolerance,
+      experienceLevel: answers.experienceLevel,
+      onboardingComplete: true,
+    };
+    await upsertProfile(updated);
+    setUser(updated);
+  }, [user]);
+
+  return (
+    <AuthContext.Provider
+      value={{
+        user,
+        isAuthenticated: !!user,
+        isLoading,
+        isInitializing,
+        login,
+        loginWithGoogle,
+        logout,
+        signup,
+        updateProfile,
+        completeOnboarding,
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
+  return ctx;
+}
