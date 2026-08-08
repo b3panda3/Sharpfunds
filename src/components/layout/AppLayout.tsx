@@ -1,14 +1,33 @@
 import { useState } from "react";
 import { Outlet, Navigate, Link } from "react-router-dom";
+import { TrendingUp } from "lucide-react";
 import Header from "./Header";
 import Sidebar from "./Sidebar";
 import MobileNav from "./MobileNav";
 import GlobalAIAssistant from "./GlobalAIAssistant";
 import { useAuth } from "../../contexts/AuthContext";
 
+function AuthLoader() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background">
+      <div className="flex flex-col items-center gap-4">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-accent/20 animate-pulse-glow">
+          <TrendingUp size={24} className="text-accent animate-pulse" />
+        </div>
+        <p className="text-sm text-muted">Loading your session...</p>
+      </div>
+    </div>
+  );
+}
+
 export default function AppLayout() {
-  const { isAuthenticated, user } = useAuth();
+  const { isAuthenticated, user, isInitializing } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Wait for auth to initialize before making routing decisions
+  if (isInitializing) {
+    return <AuthLoader />;
+  }
 
   // Not authenticated → login
   if (!isAuthenticated) {

@@ -95,14 +95,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
-        if (event === "SIGNED_IN" && session?.user) {
+        if (session?.user) {
+          // Handle all events that carry a valid session:
+          // INITIAL_SESSION (first load / OAuth redirect), SIGNED_IN, TOKEN_REFRESHED
           const profile = await fetchProfile(session.user.id);
-          if (profile) setUser(profile);
+          if (profile) {
+            setUser(profile);
+          } else {
+            // Profile doesn't exist yet — create it (handles first-time Google OAuth)
+            const newProfile: UserProfile = {
+              id: session.user.id,
+              email: session.user.email ?? "",
+              displayName: session.user.user_metadata?.full_name ?? session.user.user_metadata?.name ?? session.user.email?.split("@")[0] ?? "User",
+              avatarUrl: session.user.user_metadata?.avatar_url ?? session.user.user_metadata?.picture,
+              assetClasses: [],
+              riskTolerance: "balanced",
+              experienceLevel: "intermediate",
+              onboardingComplete: false,
+              createdAt: new Date().toISOString(),
+            };
+            await upsertProfile(newProfile);
+            setUser(newProfile);
+          }
         } else if (event === "SIGNED_OUT") {
           setUser(null);
-        } else if (event === "TOKEN_REFRESHED" && session?.user) {
-          const profile = await fetchProfile(session.user.id);
-          if (profile) setUser(profile);
         }
       }
     );
@@ -113,8 +129,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     setIsLoading(true);
     try {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw new Error(error.message);
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        // Surface the real error for better UX
+        throw new Error(error.message);
+      }
+      // If signup required email confirmation, the session will be null
+      if (!data.session) {
+        throw new Error("Email not confirmed. Please check your inbox and click the confirmation link before signing in.");
+      }
       // onAuthStateChange will set the user
     } finally {
       setIsLoading(false);
@@ -154,8 +177,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
         if (error) throw new Error(error.message);
 
-        if (data.user) {
-          // Create profile immediately
+        if (data.user && data.session) {
+          // Email confirmation is OFF — session is available immediately
+          // Create profile now (we have a valid JWT)
           const newProfile: UserProfile = {
             id: data.user.id,
             email: data.user.email ?? email,
@@ -168,6 +192,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           };
           await upsertProfile(newProfile);
           setUser(newProfile);
+        } else if (data.user && !data.session) {
+          // Email confirmation is ON — session not yet available
+          // Profile will be created on first login after confirmation
+          throw new Error("Account created! Please check your email and click the confirmation link before signing in.");
         }
       } finally {
         setIsLoading(false);

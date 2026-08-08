@@ -23,9 +23,12 @@ export default function Login() {
       } else {
         await login(email, password);
       }
-      navigate("/onboarding");
-    } catch {
-      setError("Authentication failed. Please try again.");
+      // Auth state change will handle routing — AppLayout redirects to onboarding if needed
+      navigate("/dashboard");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Authentication failed. Please try again.";
+      console.error("Auth error:", msg);
+      setError(msg);
     }
   };
 
@@ -33,9 +36,11 @@ export default function Login() {
     setError("");
     try {
       await loginWithGoogle();
-      navigate("/onboarding");
-    } catch {
-      setError("Google login failed. Please try again.");
+      // OAuth redirect happens — browser navigates away
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Google login failed. Please try again.";
+      console.error("Google auth error:", msg);
+      setError(msg);
     }
   };
 
