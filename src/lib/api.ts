@@ -419,7 +419,7 @@ async function callGemini(messages: { role: string; content: string }[]): Promis
 }
 
 async function callAI(messages: { role: string; content: string }[]): Promise<string> {
- try {
+  try {
     return await callGroq(messages);
   } catch {
     try {
