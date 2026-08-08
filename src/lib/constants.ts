@@ -186,3 +186,7 @@ export const EXPERIENCE_OPTIONS = [
   { value: "intermediate", label: "Intermediate", description: "Some experience with markets" },
   { value: "advanced", label: "Advanced", description: "Experienced investor" },
 ] as const;
+
+/* ───── Disclaimer ───── */
+
+export const FALLBACK_DISCLAIMER = "Informational only. Not investment advice.";

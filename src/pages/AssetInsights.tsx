@@ -18,7 +18,7 @@ import {
   getAISynthesis,
   getAIChatResponse,
 } from "../lib/api";
-import { FALLBACK_DISCLAIMER } from "../lib/fallback";
+import { FALLBACK_DISCLAIMER } from "../lib/constants";
 import type { MarketMover, AssetFundamentals, NewsArticle, ChatMessage, ChartPoint, TimeRange } from "../types";
 
 /* ───── Formatting Helpers ───── */

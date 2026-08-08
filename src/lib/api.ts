@@ -1,7 +1,6 @@
-import { FALLBACK_STOCKS, FALLBACK_CRYPTO, FALLBACK_MEME, FALLBACK_FOREX, FALLBACK_SP500, FALLBACK_COMMODITIES, FALLBACK_NEWS } from "./fallback";
 import type { MarketMover, AssetClass, NewsArticle, TimeRange, ChartPoint, AssetFundamentals } from "../types";
 
-// In-memory cache for the frontend
+// ─── In-memory cache ───
 const cache = new Map<string, { data: unknown; expiresAt: number }>();
 
 function isCached<T>(key: string): T | null {
@@ -15,243 +14,644 @@ function setCache(key: string, data: unknown, ttlMs: number) {
   cache.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
-/* ───── Price Data (cached 5 min) ───── */
-const PRICE_TTL = 5 * 60 * 1000;
+/* ───── Time-to-live constants ───── */
+const PRICE_TTL = 2 * 60 * 1000;       // 2 min for price data
+const CHART_TTL = 5 * 60 * 1000;       // 5 min for charts
+const NEWS_TTL = 10 * 60 * 1000;       // 10 min for news
+const AI_TTL = 30 * 60 * 1000;         // 30 min for AI analysis
+
+// ─── API Keys (from env vars, with fallbacks) ───
+const FINNHUB_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_FINNHUB_API_KEY) || "d28db1hr01qhg52rbmu0d28db1hr01qhg52rbmug";
+const ALPHA_VANTAGE_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_ALPHA_VANTAGE_API_KEY) || "J7YQ4V3X8M5Z1W2K";
+const COINGECKO_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_COINGECKO_API_KEY) || "";
+const NEWS_API_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_NEWS_API_KEY) || "";
+const GROQ_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_GROQ_API_KEY) || "";
+const GEMINI_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_GEMINI_API_KEY) || "";
+
+// ─── Symbol class mapping ───
+const SYMBOL_CLASS_MAP: Record<string, AssetClass> = {
+  AAPL: "stocks", MSFT: "stocks", GOOGL: "stocks", AMZN: "stocks",
+  TSLA: "stocks", NVDA: "stocks", META: "stocks", JPM: "stocks",
+  SPY: "sp500", IVV: "sp500", VOO: "sp500", QQQ: "sp500", DIA: "sp500",
+  BTC: "crypto", ETH: "crypto", SOL: "crypto", XRP: "crypto", ADA: "crypto", DOGE: "crypto",
+  PEPE: "meme_coins", WIF: "meme_coins", BONK: "meme_coins", FLOKI: "meme_coins",
+  "EUR/USD": "forex", "GBP/USD": "forex", "USD/JPY": "forex", "USD/CHF": "forex", "AUD/USD": "forex", "USD/CAD": "forex",
+  "GC=F": "commodities", "SI=F": "commodities", "CL=F": "commodities", "NG=F": "commodities", "HG=F": "commodities",
+};
+
+function getAssetClass(symbol: string): AssetClass {
+  return SYMBOL_CLASS_MAP[symbol] || "stocks";
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   1. STOCK DATA — Finnhub (primary) + Alpha Vantage (fallback)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+async function fetchStocksFromFinnhub(): Promise<MarketMover[]> {
+  const symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "JPM"];
+  const results: MarketMover[] = [];
+
+  const promises = symbols.map(async (sym) => {
+    try {
+      const [quoteRes, profileRes] = await Promise.all([
+        fetch(`https://finnhub.io/api/v1/quote?symbol=${sym}&token=${FINNHUB_KEY}`),
+        fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${sym}&token=${FINNHUB_KEY}`),
+      ]);
+      if (!quoteRes.ok) return;
+      const quote = await quoteRes.json();
+      if (!profileRes.ok) return;
+      const profile = await profileRes.json();
+
+      if (quote.c && quote.pc) {
+        results.push({
+          symbol: sym,
+          name: profile.name || sym,
+          price: quote.c,
+          change: quote.c - quote.pc,
+          changePercent: quote.dp || ((quote.c - quote.pc) / quote.pc) * 100,
+          volume: quote.t || 0,
+          assetClass: "stocks",
+        });
+      }
+    } catch { /* skip failed symbol */ }
+  });
+
+  await Promise.all(promises);
+  return results;
+}
+
+async function fetchStocksFromAlphaVantage(): Promise<MarketMover[]> {
+  const symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "JPM"];
+  const names: Record<string, string> = { AAPL: "Apple Inc.", MSFT: "Microsoft Corp.", GOOGL: "Alphabet Inc.", AMZN: "Amazon.com Inc.", TSLA: "Tesla Inc.", NVDA: "NVIDIA Corp.", META: "Meta Platforms", JPM: "JPMorgan Chase" };
+  const results: MarketMover[] = [];
+
+  for (const sym of symbols) {
+    try {
+      const res = await fetch(
+        `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${sym}&apikey=${ALPHA_VANTAGE_KEY}`
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      const gq = data["Global Quote"];
+      if (!gq || !gq["05. price"]) continue;
+
+      const price = parseFloat(gq["05. price"]);
+      const prevClose = parseFloat(gq["08. previous close"]) || price;
+      const change = price - prevClose;
+
+      results.push({
+        symbol: sym,
+        name: names[sym] || sym,
+        price,
+        change,
+        changePercent: prevClose ? (change / prevClose) * 100 : 0,
+        volume: parseInt(gq["06. volume"]) || 0,
+        assetClass: "stocks",
+      });
+    } catch { /* skip */ }
+    // Alpha Vantage free tier: 5 calls/min — add small delay
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return results;
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   2. CRYPTO DATA — CoinGecko (primary)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+async function fetchCryptoFromCoinGecko(): Promise<MarketMover[]> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (COINGECKO_KEY) headers["x-cg-pro-api-key"] = COINGECKO_KEY;
+
+  const res = await fetch(
+    "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=20&page=1&sparkline=false&price_change_percentage=24h",
+    { headers }
+  );
+  if (!res.ok) throw new Error(`CoinGecko ${res.status}`);
+  const data = await res.json();
+
+  return data.map((c: any) => {
+    const sym = c.symbol.toUpperCase();
+    const isMeme = ["PEPE", "WIF", "BONK", "FLOKI", "DOGE", "SHIB", "MEME"].includes(sym);
+    return {
+      symbol: sym,
+      name: c.name,
+      price: c.current_price,
+      change: c.current_price - (c.current_price / (1 + (c.price_change_percentage_24h || 0) / 100)),
+      changePercent: c.price_change_percentage_24h || 0,
+      volume: c.total_volume || 0,
+      assetClass: (isMeme ? "meme_coins" : "crypto") as AssetClass,
+    };
+  });
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   3. FOREX DATA — Frankfurter API (free, no key)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+async function fetchForexFromFrankfurter(): Promise<MarketMover[]> {
+  const res = await fetch("https://api.frankfurter.app/latest?from=USD&to=EUR,GBP,JPY,CHF,AUD,CAD");
+  if (!res.ok) throw new Error(`Frankfurter ${res.status}`);
+  const data = await res.json();
+
+  const pairs: [string, string, string][] = [
+    ["EUR", "EUR/USD", "Euro / US Dollar"],
+    ["GBP", "GBP/USD", "British Pound / USD"],
+    ["JPY", "USD/JPY", "US Dollar / Japanese Yen"],
+    ["CHF", "USD/CHF", "US Dollar / Swiss Franc"],
+    ["AUD", "AUD/USD", "Australian Dollar / USD"],
+    ["CAD", "USD/CAD", "US Dollar / Canadian Dollar"],
+  ];
+
+  // Fetch previous day for change calculation
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yStr = yesterday.toISOString().split("T")[0];
+  let prevRates: Record<string, number> = {};
+  try {
+    const prevRes = await fetch(`https://api.frankfurter.app/${yStr}?from=USD&to=EUR,GBP,JPY,CHF,AUD,CAD`);
+    if (prevRes.ok) {
+      const prevData = await prevRes.json();
+      prevRates = prevData.rates || {};
+    }
+  } catch { /* no prev data */ }
+
+  return pairs.map(([code, symbol, name]) => {
+    const rate = data.rates[code];
+    // For JPY, CHF, CAD: we invert (USD/JPY = 1/JPY rate)
+    const price = ["JPY", "CHF", "CAD"].includes(code) ? 1 / rate : rate;
+    const prevRate = prevRates[code];
+    const prevPrice = prevRate ? (["JPY", "CHF", "CAD"].includes(code) ? 1 / prevRate : prevRate) : price;
+    const change = price - prevPrice;
+    return { symbol, name, price, change, changePercent: prevPrice ? (change / prevPrice) * 100 : 0, volume: 0, assetClass: "forex" as const };
+  });
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   4. S&P 500 / ETF — Finnhub quotes
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+async function fetchSP500FromFinnhub(): Promise<MarketMover[]> {
+  const etfs = [
+    { sym: "SPY", name: "SPDR S&P 500 ETF" },
+    { sym: "QQQ", name: "Invesco QQQ Trust" },
+    { sym: "DIA", name: "SPDR Dow Jones ETF" },
+    { sym: "IVV", name: "iShares Core S&P 500 ETF" },
+    { sym: "VOO", name: "Vanguard S&P 500 ETF" },
+  ];
+  const results: MarketMover[] = [];
+
+  for (const etf of etfs) {
+    try {
+      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${etf.sym}&token=${FINNHUB_KEY}`);
+      if (!res.ok) continue;
+      const q = await res.json();
+      if (q.c && q.pc) {
+        results.push({
+          symbol: etf.sym, name: etf.name,
+          price: q.c, change: q.c - q.pc,
+          changePercent: q.dp || ((q.c - q.pc) / q.pc) * 100,
+          volume: q.t || 0, assetClass: "sp500",
+        });
+      }
+    } catch { /* skip */ }
+  }
+  return results;
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   5. COMMODITIES — Alpha Vantage (primary)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+async function fetchCommoditiesFromAV(): Promise<MarketMover[]> {
+  const commodities = [
+    { from: "XAU", to: "USD", sym: "GC=F", name: "Gold Futures" },
+    { from: "XAG", to: "USD", sym: "SI=F", name: "Silver Futures" },
+    { from: "XCU", to: "USD", sym: "HG=F", name: "Copper Futures" },
+  ];
+  const results: MarketMover[] = [];
+
+  for (const c of commodities) {
+    try {
+      const res = await fetch(
+        `https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=${c.from}&to_currency=${c.to}&apikey=${ALPHA_VANTAGE_KEY}`
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      const rate = data["Realtime Currency Exchange Rate"];
+      if (!rate) continue;
+      const price = parseFloat(rate["5. Exchange Rate"]);
+      results.push({ symbol: c.sym, name: c.name, price, change: 0, changePercent: 0, volume: 0, assetClass: "commodities" });
+    } catch { /* skip */ }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return results;
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   6. NEWS — NewsAPI.org
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+async function fetchNewsFromAPI(): Promise<NewsArticle[]> {
+  if (!NEWS_API_KEY) return [];
+
+  const queries = [
+    { q: "stocks OR stock market OR S&P 500 OR NASDAQ", symbols: ["SPY", "QQQ"] },
+    { q: "bitcoin OR ethereum OR cryptocurrency", symbols: ["BTC", "ETH"] },
+    { q: "forex OR currency OR dollar OR euro", symbols: ["EUR/USD"] },
+    { q: "Federal Reserve OR interest rate OR inflation", symbols: ["SPY", "TLT"] },
+  ];
+
+  const allArticles: NewsArticle[] = [];
+
+  for (const { q, symbols } of queries) {
+    try {
+      const res = await fetch(
+        `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&language=en&sortBy=publishedAt&pageSize=8&apiKey=${NEWS_API_KEY}`
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!data.articles) continue;
+
+      for (const a of data.articles) {
+        if (!a.title || !a.description) continue;
+        allArticles.push({
+          id: `news_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          title: a.title,
+          description: a.description,
+          url: a.url || "#",
+          source: a.source?.name || "Unknown",
+          publishedAt: a.publishedAt || new Date().toISOString(),
+          sentiment: "neutral" as const,
+          relatedSymbols: symbols,
+        });
+      }
+    } catch { /* skip */ }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  return allArticles.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   7. PRICE HISTORY — Alpha Vantage
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+async function fetchPriceHistoryFromAV(symbol: string, range: TimeRange): Promise<ChartPoint[]> {
+  // Map TimeRange to Alpha Vantage function
+  const isCrypto = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"].includes(symbol);
+  const isForex = symbol.includes("/");
+  
+  let url: string;
+  if (isCrypto) {
+    const func = range === "1D" || range === "1W" ? "DIGITAL_CURRENCY_INTRADAY" : "DIGITAL_CURRENCY_DAILY";
+    url = `https://www.alphavantage.co/query?function=${func}&symbol=${symbol}&market=USD&apikey=${ALPHA_VANTAGE_KEY}`;
+  } else if (isForex) {
+    const [from, to] = symbol.split("/");
+    url = `https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol=${from}&to_symbol=${to}&interval=60min&outputsize=full&apikey=${ALPHA_VANTAGE_KEY}`;
+  } else {
+    const func = range === "1D" || range === "1W" ? "TIME_SERIES_INTRADAY" : "TIME_SERIES_DAILY";
+    const interval = range === "1D" ? "5min" : "60min";
+    url = `https://www.alphavantage.co/query?function=${func}&symbol=${symbol}&interval=${interval}&outputsize=${range === "1M" || range === "3M" || range === "1Y" ? "full" : "compact"}&apikey=${ALPHA_VANTAGE_KEY}`;
+  }
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Alpha Vantage ${res.status}`);
+  const data = await res.json();
+
+  // Parse time series data
+  const timeSeriesKey = Object.keys(data).find((k) => k.includes("Time Series"));
+  if (!timeSeriesKey) throw new Error("No time series data");
+
+  const timeSeries = data[timeSeriesKey];
+  const points: ChartPoint[] = [];
+  const now = Date.now();
+  let count = 0;
+  const maxPoints = range === "1D" ? 78 : range === "1W" ? 168 : range === "1M" ? 30 : range === "3M" ? 90 : 365;
+
+  for (const [dateStr, values] of Object.entries(timeSeries)) {
+    if (count >= maxPoints) break;
+    const v = values as Record<string, string>;
+    const closeKey = Object.keys(v).find((k) => k.includes("close")) || Object.keys(v)[3];
+    if (closeKey) {
+      points.push({ date: new Date(dateStr).getTime(), price: parseFloat(v[closeKey]) });
+    }
+    count++;
+  }
+
+  return points.reverse();
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   8. FUNDAMENTALS — Alpha Vantage OVERVIEW
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+async function fetchFundamentalsFromAV(symbol: string): Promise<AssetFundamentals | null> {
+  try {
+    const res = await fetch(
+      `https://www.alphavantage.co/query?function=OVERVIEW&symbol=${symbol}&apikey=${ALPHA_VANTAGE_KEY}`
+    );
+    if (!res.ok) return null;
+    const d = await res.json();
+    if (!d["Symbol"]) return null;
+
+    const fundamentals: AssetFundamentals = {};
+    if (d["MarketCapitalization"]) fundamentals.marketCap = parseInt(d["MarketCapitalization"]);
+    if (d["PERatio"]) fundamentals.peRatio = parseFloat(d["PERatio"]);
+    if (d["DividendYield"]) fundamentals.dividendYield = parseFloat(d["DividendYield"]) * 100;
+    if (d["Beta"]) fundamentals.beta = parseFloat(d["Beta"]);
+    if (d["Sector"]) fundamentals.sector = d["Sector"];
+    return fundamentals;
+  } catch {
+    return null;
+  }
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   9. AI — Groq (primary) + Gemini (fallback)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+const SYSTEM_PROMPT = `You are Sharpfunds AI, a knowledgeable financial data assistant embedded in the Sharpfunds platform. Your role is to help users understand market data, news context, and financial concepts.
+
+CRITICAL RULES:
+- NEVER provide specific buy/sell/hold recommendations
+- NEVER predict specific price targets
+- Always include "_Informational only. Not investment advice._" at the end of responses
+- Be concise but informative (2-4 paragraphs max)
+- Reference specific data points when available
+- Explain financial concepts clearly
+- If asked about personal trading decisions, redirect to licensed financial advisors
+- You have access to real-time market data via the Sharpfunds platform
+- Use markdown formatting for readability (**bold** key terms)
+- Be conversational but professional`;
+
+async function callGroq(messages: { role: string; content: string }[]): Promise<string> {
+  if (!GROQ_KEY) throw new Error("No Groq key");
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_KEY}` },
+    body: JSON.stringify({
+      model: "llama-3.1-8b-instant",
+      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
+      max_tokens: 500,
+      temperature: 0.7,
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}`);
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || "I couldn't generate a response.";
+}
+
+async function callGemini(messages: { role: string; content: string }[]): Promise<string> {
+  if (!GEMINI_KEY) throw new Error("No Gemini key");
+  const contents = messages.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents, systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] }, generationConfig: { maxOutputTokens: 500, temperature: 0.7 } }),
+    }
+  );
+  if (!res.ok) throw new Error(`Gemini ${res.status}`);
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "I couldn't generate a response.";
+}
+
+async function callAI(messages: { role: string; content: string }[]): Promise<string> {
+ try {
+    return await callGroq(messages);
+  } catch {
+    try {
+      return await callGemini(messages);
+    } catch {
+      return "I'm having trouble connecting to my AI backend right now. Please try again in a moment. _Informational only. Not investment advice._";
+    }
+  }
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   PUBLIC API FUNCTIONS
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 export async function getTopMovers(assetClass?: AssetClass): Promise<MarketMover[]> {
   const cacheKey = `movers_${assetClass ?? "all"}`;
   const cached = isCached<MarketMover[]>(cacheKey);
   if (cached) return cached;
 
-  // Simulate API delay
-  await new Promise((r) => setTimeout(r, 200));
+  try {
+    let data: MarketMover[] = [];
 
-  let data: MarketMover[];
-  switch (assetClass) {
-    case "stocks":
-      data = FALLBACK_STOCKS;
-      break;
-    case "crypto":
-      data = FALLBACK_CRYPTO;
-      break;
-    case "meme_coins":
-      data = FALLBACK_MEME;
-      break;
-    case "forex":
-      data = FALLBACK_FOREX;
-      break;
-    case "sp500":
-      data = FALLBACK_SP500;
-      break;
-    case "commodities":
-      data = FALLBACK_COMMODITIES;
-      break;
-    default:
-      data = [...FALLBACK_STOCKS, ...FALLBACK_CRYPTO, ...FALLBACK_FOREX, ...FALLBACK_SP500, ...FALLBACK_COMMODITIES];
+    if (!assetClass || assetClass === "stocks") {
+      try { data.push(...await fetchStocksFromFinnhub()); } catch { data.push(...await fetchStocksFromAlphaVantage()); }
+    }
+    if (!assetClass || assetClass === "crypto" || assetClass === "meme_coins") {
+      try { data.push(...await fetchCryptoFromCoinGecko()); } catch { /* fallback handled by empty array */ }
+    }
+    if (!assetClass || assetClass === "forex") {
+      try { data.push(...await fetchForexFromFrankfurter()); } catch { /* fallback */ }
+    }
+    if (!assetClass || assetClass === "sp500") {
+      try { data.push(...await fetchSP500FromFinnhub()); } catch { /* fallback */ }
+    }
+    if (!assetClass || assetClass === "commodities") {
+      try { data.push(...await fetchCommoditiesFromAV()); } catch { /* fallback */ }
+    }
+
+    if (assetClass && data.length > 0) {
+      data = data.filter((d) => d.assetClass === assetClass);
+    }
+
+    if (data.length > 0) {
+      setCache(cacheKey, data, PRICE_TTL);
+      return data;
+    }
+  } catch (err) {
+    console.warn("All price APIs failed, using static fallback:", err);
   }
 
-  // Sort by absolute change percent descending
-  setCache(cacheKey, data, PRICE_TTL);
-  return [...data].sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent));
+  // Ultimate static fallback
+  const fallbacks = {
+    stocks: [
+      { symbol: "AAPL", name: "Apple Inc.", price: 0, change: 0, changePercent: 0, volume: 0, assetClass: "stocks" as const },
+      { symbol: "MSFT", name: "Microsoft Corp.", price: 0, change: 0, changePercent: 0, volume: 0, assetClass: "stocks" as const },
+    ],
+    crypto: [
+      { symbol: "BTC", name: "Bitcoin", price: 0, change: 0, changePercent: 0, volume: 0, assetClass: "crypto" as const },
+      { symbol: "ETH", name: "Ethereum", price: 0, change: 0, changePercent: 0, volume: 0, assetClass: "crypto" as const },
+    ],
+  };
+  return assetClass ? (fallbacks as any)[assetClass] || [] : Object.values(fallbacks).flat();
 }
 
-export async function getAssetBySymbol(symbol: string): Promise<MarketMover | null> {
-  const cacheKey = `asset_${symbol}`;
-  const cached = isCached<MarketMover>(cacheKey);
-  if (cached) return cached;
-
-  await new Promise((r) => setTimeout(r, 150));
-
-  const all = [...FALLBACK_STOCKS, ...FALLBACK_CRYPTO, ...FALLBACK_MEME, ...FALLBACK_FOREX, ...FALLBACK_SP500, ...FALLBACK_COMMODITIES];
-  const asset = all.find((a) => a.symbol === symbol) ?? null;
-  if (asset) setCache(cacheKey, asset, PRICE_TTL);
-  return asset;
+export async function getAssetBySymbol(symbol: string): Promise<MarketMover | undefined> {
+  const allMovers = await getTopMovers();
+  return allMovers.find(
+    (m) => m.symbol.toLowerCase() === symbol.toLowerCase()
+  );
 }
-
-/* ───── News (cached 30 min) ───── */
-const NEWS_TTL = 30 * 60 * 1000;
 
 export async function getNews(): Promise<NewsArticle[]> {
-  const cacheKey = "news";
+  const cacheKey = "news_all";
   const cached = isCached<NewsArticle[]>(cacheKey);
   if (cached) return cached;
 
-  await new Promise((r) => setTimeout(r, 300));
+  try {
+    const articles = await fetchNewsFromAPI();
+    if (articles.length > 0) {
+      setCache(cacheKey, articles, NEWS_TTL);
+      return articles;
+    }
+  } catch (err) {
+    console.warn("News API failed:", err);
+  }
 
-  setCache(cacheKey, FALLBACK_NEWS, NEWS_TTL);
-  return FALLBACK_NEWS;
+  return [];
 }
 
-/* ───── Placard Commentary (per-asset, cached 5 min) ───── */
+/* ───── AI Placard Commentary ───── */
 
-const commentaryCache = new Map<string, { text: string; expiresAt: number }>();
+export async function getAIPlacardCommentary(assetClass: AssetClass): Promise<string> {
+  const cacheKey = `placard_${assetClass}`;
+  const cached = isCached<string>(cacheKey);
+  if (cached) return cached;
 
-export async function getAIPlacardCommentary(symbol: string): Promise<string> {
-  const cached = commentaryCache.get(symbol);
-  if (cached && Date.now() < cached.expiresAt) return cached.text;
+  try {
+    const movers = await getTopMovers(assetClass);
+    const topGainers = [...movers].sort((a, b) => b.changePercent - a.changePercent).slice(0, 3);
+    const topLosers = [...movers].sort((a, b) => a.changePercent - b.changePercent).slice(0, 3);
 
-  // Simulate AI delay
-  await new Promise((r) => setTimeout(r, 200));
+    const context = `Market movers for ${assetClass}:
+Top gainers: ${topGainers.map((m) => `${m.symbol} +${m.changePercent.toFixed(2)}%`).join(", ")}
+Top losers: ${topLosers.map((m) => `${m.symbol} ${m.changePercent.toFixed(2)}%`).join(", ")}`;
 
-  const commentaries: Record<string, string> = {
-    AAPL: "Strong momentum from services revenue growth, offsetting modest iPhone sales. Institutional buying noted.",
-    MSFT: "Cloud revenue continues to drive growth. Azure market share gains supporting the bullish narrative.",
-    GOOGL: "Advertising revenue resilient. AI infrastructure investments creating long-term value catalysts.",
-    AMZN: "E-commerce margins improving. AWS growth stable with enterprise AI adoption accelerating.",
-    TSLA: "Delivery numbers beating estimates. Energy storage division emerging as a significant profit center.",
-    NVDA: "Data center demand surging. Next-gen GPU cycle expected to drive another record quarter.",
-    META: "Reels monetization improving. Cost discipline yielding strong free cash flow generation.",
-    JPM: "Net interest margin holding steady. Investment banking fees recovering faster than expected.",
-    BTC: "ETF inflows driving supply shock dynamics. Institutional adoption continuing to accelerate.",
-    ETH: "Layer-2 ecosystem maturing. Staking yields attracting long-term holders despite short-term volatility.",
-    SOL: "Network activity surging. DeFi TVL growing at a faster pace than competitors this quarter.",
-    XRP: "Regulatory clarity improving sentiment. Cross-border payment partnerships expanding steadily.",
-    ADA: "Network upgrades driving developer activity. Staking participation rate reaching new highs.",
-    DOGE: "Meme-driven volatility persists. Payment integration speculation fueling intermittent rallies.",
-    "GC=F": "Safe-haven demand strengthening amid geopolitical uncertainty. Central bank buying robust.",
-    "SI=F": "Industrial demand from solar manufacturing supporting prices. Silver lagging gold's rally.",
-    "CL=F": "OPEC+ production decisions creating uncertainty. Demand growth forecasts being revised lower.",
-    "NG=F": "Seasonal demand patterns driving near-term price action. Storage levels above 5-year average.",
-    "EUR/USD": "Rate differential narrowing. ECB policy divergence with Fed shaping the pair's trajectory.",
-    "GBP/USD": "UK economic data improving. Services PMI beating expectations, supporting sterling strength.",
-    SPY: "Broad market rally led by tech. Rate cut expectations supporting multiple expansion across sectors.",
-    QQQ: "Tech-heavy index benefiting from AI enthusiasm. Earnings revision breadth turning positive.",
-  };
+    const response = await callAI([
+      { role: "user", content: `Give a brief 2-sentence market commentary for the ${assetClass} asset class based on current data. Be specific about names and numbers. ${context}` }
+    ]);
 
-  const text =
-    commentaries[symbol] ??
-    `${symbol} showing active price discovery with above-average volume. Sector rotation creating pockets of opportunity. Informational only. Not investment advice.`;
-
-  commentaryCache.set(symbol, { text, expiresAt: Date.now() + 5 * 60 * 1000 });
-  return text;
+    setCache(cacheKey, response, AI_TTL);
+    return response;
+  } catch {
+    const fallbacks: Record<string, string> = {
+      stocks: "Equity markets are showing mixed signals today with tech stocks leading on strong AI sentiment while traditional sectors await clearer rate guidance.",
+      crypto: "Crypto markets are active with Bitcoin maintaining key support levels as institutional demand through ETFs continues to provide a structural bid.",
+      forex: "Currency markets are driven by central bank policy divergence, with the dollar index reflecting shifting rate cut expectations across major economies.",
+      sp500: "S&P 500 index ETFs are tracking broad market sentiment, with sector rotation between growth and value creating selective opportunities.",
+      meme_coins: "Meme coin activity remains elevated, driven by social sentiment and community engagement rather than fundamental developments.",
+      commodities: "Commodity markets are responding to geopolitical tensions and supply-demand dynamics, with precious metals benefiting from safe-haven flows.",
+    };
+    return fallbacks[assetClass] || "Markets are active. Monitor key levels and news flow for direction.",
+  }
 }
 
-/* ───── Price History (per asset, per range) ───── */
+/* ───── Price History ───── */
 
-function generateMockPrices(basePrice: number, days: number, volatility: number, symbolSeed: number): { timestamp: string; value: number }[] {
-  const points: { timestamp: string; value: number }[] = [];
-  let price = basePrice;
+export async function getPriceHistory(symbol: string, range: TimeRange): Promise<ChartPoint[]> {
+  const cacheKey = `chart_${symbol}_${range}`;
+  const cached = isCached<ChartPoint[]>(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const points = await fetchPriceHistoryFromAV(symbol, range);
+    if (points.length > 0) {
+      setCache(cacheKey, points, CHART_TTL);
+      return points;
+    }
+  } catch (err) {
+    console.warn(`Price history fetch failed for ${symbol}:`, err);
+  }
+
+  // Generate deterministic fallback chart data
+  const points: ChartPoint[] = [];
   const now = Date.now();
+  const numPoints = range === "1D" ? 78 : range === "1W" ? 168 : range === "1M" ? 30 : range === "3M" ? 90 : 365;
+  const intervalMs = range === "1D" ? 5 * 60 * 1000 : range === "1W" ? 60 * 60 * 1000 : range === "1M" ? 24 * 60 * 60 * 1000 : range === "3M" ? 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
 
-  for (let i = days; i >= 0; i--) {
-    // Deterministic-ish walk
-    const drift = (symbolSeed % 7) * 0.001 - 0.003;
-    const shock = (Math.sin(i * 1.7 + symbolSeed) * 0.5 + Math.cos(i * 0.3 + symbolSeed * 2) * 0.5) * volatility;
-    price = price * (1 + drift + shock);
-    if (price < basePrice * 0.5) price = basePrice * 0.5;
-    if (price > basePrice * 2) price = basePrice * 2;
-    const ts = new Date(now - i * 86400000);
-    points.push({ timestamp: ts.toISOString().slice(0, 10), value: Math.round(price * 100) / 100 });
+  const mover = await getAssetBySymbol(symbol);
+  const basePrice = mover?.price || 100;
+
+  let price = basePrice;
+  for (let i = 0; i < numPoints; i++) {
+    const volatility = 0.003;
+    price = price * (1 + (Math.sin(i * 0.1) * volatility));
+    points.push({ date: now - (numPoints - i) * intervalMs, price });
   }
   return points;
 }
 
-function getVolatility(assetClass: string): number {
-  switch (assetClass) {
-    case "crypto": return 0.035;
-    case "meme_coins": return 0.06;
-    case "stocks": return 0.015;
-    case "sp500": return 0.012;
-    case "commodities": return 0.02;
-    case "forex": return 0.005;
-    default: return 0.02;
-  }
-}
+/* ───── Key Stats ───── */
 
-function symbolSeed(symbol: string): number {
-  return symbol.split("").reduce((acc, c) => acc + c.charCodeAt(0), 0);
-}
-
-const DAYS_MAP: Record<string, number> = { "1D": 1, "7D": 7, "30D": 30, "90D": 90, "1Y": 365 };
-
-export async function getPriceHistory(
-  symbol: string,
-  price: number,
-  assetClass: string,
-  range: TimeRange
-): Promise<ChartPoint[]> {
-  const cacheKey = `history_${symbol}_${range}`;
-  const cached = isCached<ChartPoint[]>(cacheKey);
-  if (cached) return cached;
-
-  await new Promise((r) => setTimeout(r, 100));
-
-  const days = DAYS_MAP[range] ?? 30;
-  const vol = getVolatility(assetClass);
-  const data = generateMockPrices(price, days, vol, symbolSeed(symbol));
-  setCache(cacheKey, data, PRICE_TTL);
-  return data;
-}
-
-/* ───── Key Stats (52w high/low, MA) ───── */
-
-export async function getKeyStats(symbol: string, price: number, assetClass: string): Promise<{
-  high52w: number;
-  low52w: number;
-  ma50: number;
-  ma200: number;
-}> {
+export async function getKeyStats(symbol: string): Promise<{ high52w: number; low52w: number; ma50: number; ma200: number } | null> {
   const cacheKey = `stats_${symbol}`;
   const cached = isCached<{ high52w: number; low52w: number; ma50: number; ma200: number }>(cacheKey);
   if (cached) return cached;
 
-  await new Promise((r) => setTimeout(r, 80));
+  try {
+    const points = await getPriceHistory(symbol, "1Y");
+    if (points.length < 10) return null;
 
-  const vol = getVolatility(assetClass);
-  const seed = symbolSeed(symbol);
-  const high52w = Math.round(price * (1 + vol * 3 + (seed % 10) * 0.01) * 100) / 100;
-  const low52w = Math.round(price * (1 - vol * 2.5 - (seed % 8) * 0.01) * 100) / 100;
-  const ma50 = Math.round(price * (1 + (seed % 5 - 2) * 0.005) * 100) / 100;
-  const ma200 = Math.round(price * (1 + (seed % 7 - 3) * 0.008) * 100) / 100;
-  const stats = { high52w, low52w, ma50, ma200 };
-  setCache(cacheKey, stats, PRICE_TTL);
-  return stats;
+    const prices = points.map((p) => p.price);
+    const high52w = Math.max(...prices);
+    const low52w = Math.min(...prices);
+
+    const ma50 = prices.length >= 50
+      ? prices.slice(-50).reduce((a, b) => a + b, 0) / 50
+      : prices.reduce((a, b) => a + b, 0) / prices.length;
+    const ma200 = prices.length >= 200
+      ? prices.slice(-200).reduce((a, b) => a + b, 0) / 200
+      : ma50;
+
+    const stats = { high52w, low52w, ma50, ma200 };
+    setCache(cacheKey, stats, PRICE_TTL);
+    return stats;
+  } catch {
+    return null;
+  }
 }
 
 /* ───── Fundamentals ───── */
-
-const FUNDAMENTALS_DATA: Record<string, AssetFundamentals> = {
-  AAPL: { marketCap: 2850000000000, peRatio: 28.4, dividendYield: 0.52, beta: 1.21, sector: "Technology" },
-  MSFT: { marketCap: 3120000000000, peRatio: 35.2, dividendYield: 0.71, beta: 0.89, sector: "Technology" },
-  GOOGL: { marketCap: 2150000000000, peRatio: 26.8, dividendYield: 0.44, beta: 1.05, sector: "Technology" },
-  AMZN: { marketCap: 1980000000000, peRatio: 44.1, dividendYield: 0, beta: 1.17, sector: "Consumer Cyclical" },
-  TSLA: { marketCap: 790000000000, peRatio: 58.6, dividendYield: 0, beta: 2.05, sector: "Automotive" },
-  NVDA: { marketCap: 2180000000000, peRatio: 72.3, dividendYield: 0.04, beta: 1.68, sector: "Technology" },
-  META: { marketCap: 1290000000000, peRatio: 24.5, dividendYield: 0, beta: 1.22, sector: "Technology" },
-  JPM: { marketCap: 570000000000, peRatio: 12.1, dividendYield: 2.15, beta: 1.12, sector: "Financial Services" },
-  BTC: { marketCap: 1320000000000, circulatingSupply: 19700000, totalSupply: 21000000, allTimeHigh: 73750 },
-  ETH: { marketCap: 415000000000, circulatingSupply: 120200000, totalSupply: null as unknown as undefined, allTimeHigh: 4878 },
-  SOL: { marketCap: 65000000000, circulatingSupply: 443000000, totalSupply: null as unknown as undefined, allTimeHigh: 260 },
-  XRP: { marketCap: 34000000000, circulatingSupply: 54300000000, totalSupply: 100000000000, allTimeHigh: 3.84 },
-  ADA: { marketCap: 16000000000, circulatingSupply: 35000000000, totalSupply: 45000000000, allTimeHigh: 3.10 },
-  DOGE: { marketCap: 18000000000, circulatingSupply: 143000000000, totalSupply: null as unknown as undefined, allTimeHigh: 0.74 },
-  PEPE: { liquidity: 8500000, volume24h: 580000000, holderCount: 240000 },
-  WIF: { liquidity: 4200000, volume24h: 420000000, holderCount: 85000 },
-  BONK: { liquidity: 3100000, volume24h: 310000000, holderCount: 620000 },
-  FLOKI: { liquidity: 2800000, volume24h: 280000000, holderCount: 410000 },
-  "EUR/USD": { yearHigh: 1.12, yearLow: 1.05, centralBankRate: 4.25 },
-  "GBP/USD": { yearHigh: 1.32, yearLow: 1.24, centralBankRate: 5.25 },
-  "USD/JPY": { yearHigh: 158.00, yearLow: 140.00, centralBankRate: 0.50 },
-  "USD/CHF": { yearHigh: 0.92, yearLow: 0.85, centralBankRate: 1.75 },
-  "AUD/USD": { yearHigh: 0.69, yearLow: 0.63, centralBankRate: 4.35 },
-  SPY: { marketCap: 510000000000, peRatio: 23.5, dividendYield: 1.32, beta: 1.0, sector: "ETF — Broad Market" },
-  QQQ: { marketCap: 285000000000, peRatio: 31.2, dividendYield: 0.64, beta: 1.15, sector: "ETF — Technology" },
-  "GC=F": { marketCap: null as unknown as undefined, sector: "Precious Metals" },
-  "SI=F": { marketCap: null as unknown as undefined, sector: "Precious Metals" },
-  "CL=F": { marketCap: null as unknown as undefined, sector: "Energy" },
-  "NG=F": { marketCap: null as unknown as undefined, sector: "Energy" },
-};
 
 export async function getFundamentals(symbol: string): Promise<AssetFundamentals | null> {
   const cacheKey = `fundamentals_${symbol}`;
   const cached = isCached<AssetFundamentals>(cacheKey);
   if (cached) return cached;
 
-  await new Promise((r) => setTimeout(r, 150));
+  const assetClass = getAssetClass(symbol);
+  if (assetClass === "forex" || assetClass === "meme_coins") return null;
 
-  const data = FUNDAMENTALS_DATA[symbol] ?? null;
-  if (data) setCache(cacheKey, data, PRICE_TTL);
-  return data;
+  try {
+    const data = await fetchFundamentalsFromAV(symbol);
+    if (data) {
+      setCache(cacheKey, data, PRICE_TTL);
+      return data;
+    }
+  } catch { /* fallback */ }
+
+  // For crypto, fetch from CoinGecko
+  if (assetClass === "crypto") {
+    try {
+      const headers: Record<string, string> = { Accept: "application/json" };
+      if (COINGECKO_KEY) headers["x-cg-pro-api-key"] = COINGECKO_KEY;
+      const idMap: Record<string, string> = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", XRP: "ripple", ADA: "cardano", DOGE: "dogecoin" };
+      const coinId = idMap[symbol];
+      if (!coinId) return null;
+
+      const res = await fetch(`https://api.coingecko.com/api/v3/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`, { headers });
+      if (!res.ok) return null;
+      const d = await res.json();
+
+      const fundamentals: AssetFundamentals = {
+        marketCap: d.market_data?.market_cap?.usd,
+        circulatingSupply: d.market_data?.circulating_supply,
+        totalSupply: d.market_data?.total_supply,
+        allTimeHigh: d.market_data?.ath?.usd,
+      };
+      setCache(cacheKey, fundamentals, PRICE_TTL);
+      return fundamentals;
+    } catch { /* fallback */ }
+  }
+
+  return null;
 }
 
 /* ───── Related News ───── */
@@ -261,14 +661,21 @@ export async function getAssetRelatedNews(symbol: string): Promise<NewsArticle[]
   const cached = isCached<NewsArticle[]>(cacheKey);
   if (cached) return cached;
 
-  await new Promise((r) => setTimeout(r, 200));
-
-  const allNews = FALLBACK_NEWS.filter((a) => a.relatedSymbols?.includes(symbol));
-  setCache(cacheKey, allNews, NEWS_TTL);
-  return allNews;
+  try {
+    const allNews = await getNews();
+    const related = allNews.filter(
+      (a) => a.relatedSymbols?.some((s) => s.toLowerCase() === symbol.toLowerCase()) ||
+        a.title.toLowerCase().includes(symbol.toLowerCase()) ||
+        a.description.toLowerCase().includes(symbol.toLowerCase())
+    );
+    setCache(cacheKey, related, NEWS_TTL);
+    return related;
+  } catch {
+    return [];
+  }
 }
 
-/* ───── News AI Chat (context-aware, for news page chatbot) ───── */
+/* ───── News AI Chat ───── */
 
 export async function getNewsAIChatResponse(
   userMessage: string,
@@ -280,178 +687,92 @@ export async function getNewsAIChatResponse(
   },
   recentHeadlines: string[]
 ): Promise<string> {
-  await new Promise((r) => setTimeout(r, 1200));
+  const contextStr = `
+User: ${userContext.displayName}
+Risk tolerance: ${userContext.riskTolerance}
+Experience: ${userContext.experienceLevel}
+Tracked assets: ${userContext.trackedAssets.map((a) => `${a.symbol} (${a.assetClass})`).join(", ")}
+Recent headlines: ${recentHeadlines.slice(0, 5).join(" | ")}`;
 
-  const lower = userMessage.toLowerCase();
-  const trackedSymbols = userContext.trackedAssets.map((a) => a.symbol);
-  const trackedStr = trackedSymbols.join(", ");
-
-  // Find which tracked assets are mentioned
-  const mentionedAssets = userContext.trackedAssets.filter(
-    (a) => lower.includes(a.symbol.toLowerCase()) || lower.includes(a.name.toLowerCase().split(" ")[0])
-  );
-
-  // Refuse buy/sell advice
-  if (lower.includes("buy") || lower.includes("sell") || lower.includes("should i") || lower.includes("recommend")) {
-    return `I understand you're looking for trading guidance${mentionedAssets.length > 0 ? ` regarding ${mentionedAssets.map((a) => a.symbol).join(", ")}` : ""}, but I can't provide specific buy or sell recommendations. My role is to help you understand the news context and how it may relate to your portfolio. Consider speaking with a licensed financial advisor for personalized trading decisions. _Informational only. Not investment advice._`;
-  }
-
-  // Build a response that references tracked assets when relevant
-  const name = userContext.displayName.split(" ")[0] || "there";
-
-  // Check for crypto questions
-  if (lower.includes("crypto") || lower.includes("bitcoin") || lower.includes("ethereum")) {
-    const cryptoAssets = userContext.trackedAssets.filter((a) => a.assetClass === "crypto");
-    const cryptoRef = cryptoAssets.length > 0
-      ? ` I see you're tracking ${cryptoAssets.map((a) => a.symbol).join(", ")} —`
-      : "";
-
-    return `Great question, ${name}!${cryptoRef} crypto markets have seen notable activity recently. Bitcoin's ETF inflows continue driving institutional demand, while Ethereum's layer-2 ecosystem is maturing rapidly with transaction volumes reaching new highs. ${cryptoAssets.length > 0 ? `Your tracked crypto assets — ${cryptoAssets.map((a) => `${a.symbol} (${a.name})`).join(", ")} — are positioned within a sector that's showing strong fundamental development, though near-term volatility remains elevated.` : ""} Keep an eye on regulatory developments and macro factors, as these tend to influence crypto prices significantly. _Informational only. Not investment advice._`;
-  }
-
-  // Check for stock-specific questions
-  if (lower.includes("stock") || lower.includes("equity") || mentionedAssets.some((a) => a.assetClass === "stocks")) {
-    const stockAssets = mentionedAssets.filter((a) => a.assetClass === "stocks");
-    const targetAssets = stockAssets.length > 0 ? stockAssets : userContext.trackedAssets.filter((a) => a.assetClass === "stocks");
-    const stockRef = targetAssets.length > 0
-      ? ` Looking specifically at ${targetAssets.map((a) => a.symbol).join(", ")}`
-      : "";
-
-    return `Happy to break that down, ${name}!${stockRef} — the equity markets are responding to a mix of factors right now. Strong corporate earnings have been supporting valuations, but sticky inflation data and uncertainty around the Fed's rate path are creating headwinds.${targetAssets.length > 0 ? ` Your tracked stocks ${targetAssets.map((a) => `${a.symbol}`).join(", ")} are in sectors that are benefiting from the current AI investment cycle and consumer resilience, though valuation multiples warrant monitoring.` : ""} The key theme this week is the tug-of-war between positive earnings momentum and macro uncertainty. _Informational only. Not investment advice._`;
-  }
-
-  // Check for macro questions
-  if (lower.includes("macro") || lower.includes("fed") || lower.includes("rate") || lower.includes("inflation") || lower.includes("economy") || lower.includes("gdp")) {
-    return `Great macro question, ${name}! Looking at the headlines, we're seeing a mixed picture: GDP growth was revised up, which is positive, but inflation data came in hotter than expected, which delayed rate cut expectations. For your portfolio, which includes ${trackedStr}, this means: (1) growth-oriented assets could benefit if the economy stays resilient, but (2) higher-for-longer rates could pressure valuations. Your ${userContext.riskTolerance} risk profile is well-suited to navigate this environment by staying diversified. _Informational only. Not investment advice._`;
-  }
-
-  // Check for forex questions
-  if (lower.includes("forex") || lower.includes("currency") || lower.includes("dollar") || lower.includes("euro") || lower.includes("yen")) {
-    const forexAssets = userContext.trackedAssets.filter((a) => a.assetClass === "forex");
-    const forexRef = forexAssets.length > 0
-      ? ` Since you're tracking ${forexAssets.map((a) => a.symbol).join(", ")},`
-      : "";
-
-    return `Good question on currencies!${forexRef} here's what's moving the forex markets: central bank policy divergence is the dominant theme. The ECB and Bank of England are signaling potential cuts, while the Fed remains cautious. The yen is under particular pressure, with USD/JPY testing key levels near 155 — intervention risks are growing. Currency markets are pricing in rate differential expectations, so any shift in central bank language could trigger significant moves. _Informational only. Not investment advice._`;
-  }
-
-  // Check for summary request
-  if (lower.includes("summar") || lower.includes("overview") || lower.includes("top") || lower.includes("headline")) {
-    const headlineSample = recentHeadlines.slice(0, 3).map((h) => `• ${h}`).join("\n");
-    return `Here's a quick overview of today's top stories, ${name}:\n\n${headlineSample}\n\nThe common thread across today's news is the market's focus on central bank policy direction and AI-driven sector momentum. For your portfolio (${trackedStr}), the key takeaway is that macro conditions are gradually improving, but patience remains warranted. Sector rotation continues, with technology and AI-related assets leading while traditional sectors await clearer rate signals. _Informational only. Not investment advice._`;
-  }
-
-  // Default personalized response
-  const headlineRef = recentHeadlines.length > 0
-    ? ` Looking at the latest headlines: "${recentHeadlines[0]}" — this is representative of the current market narrative.`
-    : "";
-
-  return `Thanks for asking, ${name}! Based on your profile (${userContext.riskTolerance} risk tolerance, ${userContext.experienceLevel} experience) and tracked assets (${trackedStr}), here's my perspective:${headlineRef} The market environment continues to evolve, and the most relevant factor for your portfolio is how the macro backdrop interacts with your specific asset classes. Stay focused on your long-term objectives and use volatility as an opportunity to review your allocation. _Informational only. Not investment advice._`;
+  return callAI([
+    { role: "user", content: `${contextStr}\n\nUser question: ${userMessage}` }
+  ]);
 }
 
-/* ───── AI Synthesis (per asset, cached 30 min) ───── */
-
-const SYNTHESIS_TTL = 30 * 60 * 1000;
-const synthesisCache = new Map<string, { text: string; expiresAt: number }>();
-
-const SYNTHESES: Record<string, string> = {
-  AAPL: [
-    "**Performance drivers:** Apple's recent price action reflects strong momentum from its services revenue segment, which hit an all-time high of $24.1B in the latest quarter. The steady expansion of high-margin recurring revenue from the App Store, Apple Music, iCloud, and Apple Care has diversified earnings away from iPhone dependence. Additionally, institutional buying has been noted as the company's massive cash flow generation supports continued share buybacks.",
-    "**Key risks and headwinds:** iPhone sales continue to show modest declines, particularly in the Greater China region where competition from domestic manufacturers is intensifying. Regulatory scrutiny over the App Store's commission structure remains an ongoing overhang, with both the EU's Digital Markets Act and ongoing US DOJ actions presenting potential revenue headwinds. The stock's premium valuation relative to historical multiples leaves limited margin for execution missteps.",
-    "**Forward-looking context:** Apple's growing installed base of over 2 billion active devices provides a durable competitive moat. The potential for AI-driven features in the next iPhone cycle — coupled with anticipated growth in wearables and services — positions the company for mid-single-digit revenue growth. The expanding gross margins in services continue to improve overall profitability. _Informational only. Not investment advice._"
-  ].join("\n\n"),
-  BTC: [
-    "**Performance drivers:** Bitcoin's recent surge past $67,000 has been fueled by record-breaking inflows into spot Bitcoin ETFs, with a single-day record of $1.2B in net new capital. Institutional adoption continues to accelerate, with major asset allocators increasing portfolio allocations to BTC as a digital store of value. The upcoming halving event has historically acted as a supply-side catalyst every four years.",
-    "**Key risks and headwinds:** Despite strong institutional inflows, Bitcoin remains highly sensitive to macro liquidity conditions. A sustained hawkish shift from the Federal Reserve could redirect capital away from risk assets, including crypto. Regulatory fragmentation across jurisdictions — particularly differing approaches in the US, EU, and Asia — creates ongoing uncertainty for market participants and custodian operations.",
-    "**Forward-looking context:** The supply shock dynamics created by ETF demand absorbing newly mined coins at a faster rate than production could create upward price pressure over the medium term. Growing integration with traditional financial infrastructure, including options markets and prime brokerage services, suggests deepening market maturity. The long-term adoption curve tracks broader digital asset acceptance trends. _Informational only. Not investment advice._"
-  ].join("\n\n"),
-  NVDA: [
-    "**Performance drivers:** NVIDIA's share price continues to benefit from surging data center demand as hyperscale cloud providers compete for limited GPU supply. The latest Blackwell Ultra GPU architecture promises a 40% performance improvement over its predecessor, reinforcing the company's technological lead in AI training and inference hardware. Enterprise AI adoption is accelerating beyond early adopters into traditional industries.",
-    "**Key risks and headwinds:** Geopolitical export restrictions to certain markets create a tangible revenue ceiling in specific geographic segments. The risk of customer concentration — with a small number of hyperscalers accounting for a disproportionate share of revenue — presents a demand-side vulnerability. Competitor developments in custom ASIC chips from cloud providers themselves could gradually erode NVIDIA's near-monopoly positioning in AI accelerators.",
-    "**Forward-looking context:** The secular trend toward AI infrastructure build-out shows no signs of deceleration, with enterprise AI spending forecasts continuing to be revised upward. NVIDIA's software ecosystem, particularly CUDA, provides a significant stickiness advantage. The company's expanding total addressable market into automotive, robotics, and digital twins supports a multi-year growth runway. _Informational only. Not investment advice._"
-  ].join("\n\n"),
-  ETH: [
-    "**Performance drivers:** Ethereum's price action reflects growing maturity in its layer-2 scaling ecosystem, which recently surpassed the mainnet in daily transaction volume for the first time. Staking yields — currently around 3.5% — continue to attract long-term holders, reducing circulating supply velocity. Institutional interest through the recently approved spot ETH ETFs provides a new demand channel.",
-    "**Key risks and headwinds:** Competition from faster and lower-cost layer-1 blockchains such as Solana and Aptos continues to capture developer mindshare and user activity. The transition to a proof-of-stake model has reduced energy consumption but introduced new centralization concerns around validator concentration. Regulatory classification of ETH as a commodity vs. security remains an unresolved legal question in several jurisdictions.",
-    "**Forward-looking context:** The continued expansion of the layer-2 ecosystem, combined with EIP improvements enhancing mainnet scalability, positions Ethereum as the settlement layer for a growing DeFi and tokenization economy. Real-world asset tokenization — particularly in private credit and treasuries — represents a significant on-chain growth catalyst. _Informational only. Not investment advice._"
-  ].join("\n\n"),
-  TSLA: [
-    "**Performance drivers:** Tesla's recent delivery numbers have exceeded consensus expectations, driven by strong demand in North America and cost reductions in manufacturing. The energy storage division — including Megapack and Powerwall — is emerging as a meaningful profit center, with margins surpassing the automotive segment in recent quarters. Full Self-Driving software revenue continues to contribute high-margin recurring income.",
-    "**Key risks and headwinds:** The increasingly competitive EV landscape, particularly from Chinese manufacturers like BYD, is pressuring global market share. Price cuts implemented throughout the year have compressed automotive margins below 20%, raising questions about sustainable profitability. CEO Elon Musk's attention being split across multiple companies and controversial public statements introduce governance risk that the market continues to price at a discount.",
-    "**Forward-looking context:** The long-term thesis rests on three pillars: expanding full autonomy capabilities, next-gen vehicle platform cost reductions, and energy storage scaling. The Cybertruck ramp, while slower than anticipated, opens a new addressable market in the North American pickup segment. Robotaxi network deployment timeline clarity would represent a significant catalyst. _Informational only. Not investment advice._"
-  ].join("\n\n"),
-};
+/* ───── AI Synthesis ───── */
 
 export async function getAISynthesis(symbol: string): Promise<string> {
-  const cached = synthesisCache.get(symbol);
-  if (cached && Date.now() < cached.expiresAt) return cached.text;
+  const cacheKey = `synthesis_${symbol}`;
+  const cached = isCached<string>(cacheKey);
+  if (cached) return cached;
 
-  await new Promise((r) => setTimeout(r, 800));
+  try {
+    const [mover, fundamentals, stats] = await Promise.all([
+      getAssetBySymbol(symbol),
+      getFundamentals(symbol),
+      getKeyStats(symbol),
+    ]);
 
-  const text =
-    SYNTHESES[symbol] ??
-    [
-      `**Performance drivers:** ${symbol} has shown active price discovery in recent sessions, with above-average volume suggesting meaningful market participation. Sector-specific catalysts and broader macro conditions are contributing to the current price action dynamics. Technical indicators point to established trend channels that warrant observation.`,
-      `**Key risks and headwinds:** The primary risks for ${symbol} include macro sensitivity to interest rate expectations and broader market liquidity conditions. Asset-specific factors, including competitive pressures and regulatory developments, present additional uncertainty. Position sizing should account for the inherent volatility of this asset class.`,
-      `**Forward-looking context:** ${symbol} trades within a broader market context that continues to evolve. The convergence of sector trends, capital flows, and macroeconomic factors will shape the medium-term trajectory. Continued monitoring of both technical levels and fundamental developments is recommended for a comprehensive view. _Informational only. Not investment advice._`
-    ].join("\n\n");
+    const dataContext = `
+Asset: ${mover?.name || symbol} (${symbol})
+Current Price: $${mover?.price?.toFixed(2) || "N/A"}
+Daily Change: ${mover?.changePercent?.toFixed(2) || "N/A"}%
+52-Week High: ${stats?.high52w?.toFixed(2) || "N/A"}
+52-Week Low: ${stats?.low52w?.toFixed(2) || "N/A"}
+MA50: ${stats?.ma50?.toFixed(2) || "N/A"}
+MA200: ${stats?.ma200?.toFixed(2) || "N/A"}
+Fundamentals: ${fundamentals ? JSON.stringify(fundamentals) : "N/A"}`;
 
-  synthesisCache.set(symbol, { text, expiresAt: Date.now() + SYNTHESIS_TTL });
-  return text;
+    const response = await callAI([
+      { role: "user", content: `Provide a comprehensive AI synthesis for this asset. Structure it as: **Performance drivers:** (key factors), **Key risks and headwinds:** (main concerns), **Forward-looking context:** (outlook). ${dataContext}` }
+    ]);
+
+    setCache(cacheKey, response, AI_TTL);
+    return response;
+  } catch {
+    return `**Performance drivers:** ${symbol} is showing active trading with meaningful market participation. Sector-specific catalysts and broader macro conditions are contributing to current price action.
+
+**Key risks and headwinds:** The primary risks include macro sensitivity to interest rate expectations and broader market liquidity conditions. Asset-specific factors present additional uncertainty.
+
+**Forward-looking context:** ${symbol} trades within a broader market context that continues to evolve. The convergence of sector trends, capital flows, and macroeconomic factors will shape the medium-term trajectory. _Informational only. Not investment advice._`;
+  }
 }
 
-/* ───── AI Chat (session-aware, per asset) ───── */
+/* ───── AI Chat (per-asset) ───── */
 
 export async function getAIChatResponse(
   symbol: string,
-  _conversation: { role: string; content: string }[],
+  conversation: { role: string; content: string }[],
   question: string
 ): Promise<string> {
-  await new Promise((r) => setTimeout(r, 500));
+  try {
+    const mover = await getAssetBySymbol(symbol);
+    const context = `Chatting about ${mover?.name || symbol} (${symbol}), current price $${mover?.price?.toFixed(2) || "N/A"}, daily change ${mover?.changePercent?.toFixed(2) || "N/A"}%.`;
 
-  const lower = question.toLowerCase();
+    const messages = [
+      { role: "user", content: `${context}\n\nConversation so far: ${conversation.map((m) => `${m.role}: ${m.content}`).join("\n")}\n\nUser question: ${question}` }
+    ];
 
-  // Refuse buy/sell recommendations
-  if (lower.includes("buy") || lower.includes("sell") || lower.includes("should i") || lower.includes("recommend")) {
-    return `I understand you're asking about a trading decision regarding ${symbol}, but I can't provide specific buy or sell recommendations. My role is to provide context, analysis of current conditions, and relevant data — not personalized investment advice. Consider speaking with a licensed financial advisor for personalized guidance. _Informational only. Not investment advice._`;
+    return await callAI(messages);
+  } catch {
+    return `Looking at ${symbol}, the current market data shows active trading. Key levels to monitor include recent support and resistance areas. _Informational only. Not investment advice._`;
   }
-
-  // Asset-specific responses
-  const responses: Record<string, string[]> = {
-    AAPL: [
-      `Regarding ${symbol}'s competitive positioning — Apple's services ecosystem creates a powerful moat that competitors find difficult to replicate. The 2B+ active device installed base provides a recurring revenue stream that now represents over 25% of total revenue. This diversification reduces earnings volatility compared to the company's historical iPhone-dependent model.`,
-      `On valuation: ${symbol} currently trades at approximately 28x forward earnings, which is above its 5-year average of 22x. The premium multiple reflects the market's confidence in services-led margin expansion and the potential AI-driven upgrade cycle. However, the current valuation leaves limited room for error in execution.`
-    ],
-    BTC: [
-      `On Bitcoin's ETF flows: The sustained institutional inflow into spot ETFs is a structurally bullish development because it creates a persistent buy-side pressure that didn't exist in previous cycles. Unlike retail-dominated exchange flows, ETF inflows represent long-term capital allocations from pension funds, endowments, and institutional asset allocators that tend to have multi-year holding horizons.`,
-      `Regarding supply dynamics: Approximately 900 new BTC are mined daily, but ETF demand has been absorbing multiple times that amount. This supply-demand imbalance is a key factor in the current price dynamics. The upcoming halving will further reduce daily issuance to 450 BTC, intensifying this effect.`
-    ],
-  };
-
-  const assetResponses = responses[symbol];
-  if (assetResponses) {
-    return assetResponses[_conversation.length % assetResponses.length];
-  }
-
-  return `Looking at ${symbol} specifically, the current market data shows active trading with volume patterns that suggest meaningful institutional participation. The asset's price action should be evaluated within the context of its sector trends and broader market conditions. Key levels to monitor include recent support and resistance areas on the daily timeframe. _Informational only. Not investment advice._`;
 }
 
-/* ───── Legacy AI Commentary ───── */
+/* ───── Legacy AI Commentary (Global AI fallback) ───── */
 
 export async function getAIResponse(
-  _message: string,
-  _userContext?: { trackedAssets: string[]; riskTolerance: string }
+  message: string,
+  userContext?: { trackedAssets: string[]; riskTolerance: string }
 ): Promise<string> {
-  // Simulate AI response
-  await new Promise((r) => setTimeout(r, 600));
-
-  const responses = [
-    "Looking at the current market landscape, we're seeing interesting rotation patterns. Tech stocks continue to show momentum, particularly in the AI sector. **Informational only. Not investment advice.**",
-    "Based on your tracked assets and medium risk profile, the current market conditions suggest a cautiously optimistic outlook. The macroeconomic picture is improving with potential rate cuts on the horizon. **Informational only. Not investment advice.**",
-    "The crypto market is showing renewed strength, led by Bitcoin's breakout above key resistance levels. Market sentiment indicators point to growing institutional interest. **Informational only. Not investment advice.**",
-    "I can see your watchlist includes a mix of growth and value assets. The current market environment favors a balanced approach — but remember, past performance doesn't guarantee future results. **Informational only. Not investment advice.**",
-    "Several of your tracked stocks are showing above-average trading volume today, which often precedes significant price movement. Monitor closely for confirmation. **Informational only. Not investment advice.**",
-  ];
-
-  return responses[Math.floor(Math.random() * responses.length)];
+  try {
+    const contextStr = userContext
+      ? `User tracks: ${userContext.trackedAssets.join(", ")}. Risk: ${userContext.riskTolerance}.`
+      : "";
+    return await callAI([
+      { role: "user", content: `${contextStr} ${message}` }
+    ]);
+  } catch {
+    return "I'm having trouble connecting right now. Please try again. _Informational only. Not investment advice._";
+  }
 }

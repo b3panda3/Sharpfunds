@@ -37,7 +37,8 @@ export default function App() {
               <Route path="/health" element={<Health />} />
             </Route>
 
-            {/* Catch-all */}
+            {/* Root & catch-all */}
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </WatchlistProvider>
