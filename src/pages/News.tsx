@@ -236,7 +236,9 @@ export default function News() {
               <p className="mt-2 text-sm text-muted">
                 {searchQuery
                   ? "Try a different search term or clear your query"
-                  : "Try a different category filter"}
+                  : news.length === 0
+                    ? "Financial news requires a NewsAPI key. Set VITE_NEWS_API_KEY on Vercel to enable live news."
+                    : "Try a different category filter"}
               </p>
             </div>
           ) : (

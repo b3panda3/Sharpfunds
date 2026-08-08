@@ -146,10 +146,23 @@ export default function GlobalAIAssistant() {
     } catch {
       // Client-side fallback using Groq/Gemini directly
       try {
+        // Fetch real prices for context
+        let priceContext = "";
+        try {
+          const movers = await getTopMovers();
+          if (movers && movers.length > 0) {
+            const topMovers = movers.slice(0, 8);
+            priceContext = "\n\nCurrent market data (live):\n" +
+              topMovers.map((m: MarketMover) =>
+                `  ${m.symbol}: $${m.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} (${m.changePercent >= 0 ? "+" : ""}${m.changePercent.toFixed(2)}%)`
+              ).join("\n");
+          }
+        } catch { /* price fetch optional */ }
+
         const aiText = await getAIResponse(text, {
           trackedAssets: watchlist.map((w) => w.symbol),
           riskTolerance: user?.riskTolerance ?? "balanced",
-        });
+        }, priceContext);
         const aiMsg: ChatMessage = {
           id: `msg_${Date.now() + 1}`,
           role: "assistant",

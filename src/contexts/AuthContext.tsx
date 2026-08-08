@@ -17,6 +17,33 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
+// ─── localStorage helpers for onboarding persistence ───
+function getOnboardingFlag(userId: string): boolean {
+  try {
+    return localStorage.getItem(`sf_onboard_${userId}`) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function setOnboardingFlag(userId: string, complete: boolean): void {
+  try {
+    if (complete) {
+      localStorage.setItem(`sf_onboard_${userId}`, "true");
+    } else {
+      localStorage.removeItem(`sf_onboard_${userId}`);
+    }
+  } catch { /* localStorage unavailable */ }
+}
+
+function clearOnboardingFlag(userId: string): void {
+  try {
+    localStorage.removeItem(`sf_onboard_${userId}`);
+  } catch { /* ok */ }
+}
+
+// ─── DB helpers ───
+
 function mapDbProfileToUserProfile(row: Record<string, unknown>): UserProfile {
   return {
     id: row.id as string,
@@ -43,7 +70,7 @@ async function fetchProfile(userId: string): Promise<UserProfile | null> {
 }
 
 async function upsertProfile(profile: Partial<UserProfile> & { id: string }): Promise<void> {
-  const { error, data } = await supabase.from("user_profiles").upsert(
+  const { error } = await supabase.from("user_profiles").upsert(
     {
       id: profile.id,
       email: profile.email,
@@ -61,7 +88,15 @@ async function upsertProfile(profile: Partial<UserProfile> & { id: string }): Pr
     console.error("[upsertProfile] Failed:", error.message, error.code, error.hint);
     throw new Error(error.message);
   }
-  console.log("[upsertProfile] Success for user", profile.id);
+}
+
+/** Merge DB profile with localStorage onboarding flag — localStorage wins */
+function mergeWithLocalFlag(profile: UserProfile): UserProfile {
+  if (!profile.onboardingComplete && getOnboardingFlag(profile.id)) {
+    console.log("[auth] DB says onboarding incomplete but localStorage says complete — trusting localStorage");
+    return { ...profile, onboardingComplete: true };
+  }
+  return profile;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -75,21 +110,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (session?.user) {
         const profile = await fetchProfile(session.user.id);
         if (profile) {
-          setUser(profile);
+          const merged = mergeWithLocalFlag(profile);
+          setUser(merged);
+          // If localStorage forced onboardingComplete=true, sync back to DB in background
+          if (merged.onboardingComplete && !profile.onboardingComplete) {
+            upsertProfile(merged).catch(() => { /* best effort */ });
+          }
         } else {
-          // Profile not yet created (trigger hasn't run) — create it now
           const newProfile: UserProfile = {
             id: session.user.id,
             email: session.user.email ?? "",
-            displayName: session.user.user_metadata?.full_name ?? session.user.email?.split("@")[0] ?? "User",
-            avatarUrl: session.user.user_metadata?.avatar_url,
+            displayName: session.user.user_metadata?.full_name ?? session.user.user_metadata?.name ?? session.user.email?.split("@")[0] ?? "User",
+            avatarUrl: session.user.user_metadata?.avatar_url ?? session.user.user_metadata?.picture,
             assetClasses: [],
             riskTolerance: "balanced",
             experienceLevel: "intermediate",
-            onboardingComplete: false,
+            onboardingComplete: getOnboardingFlag(session.user.id),
             createdAt: new Date().toISOString(),
           };
-          await upsertProfile(newProfile);
+          try {
+            await upsertProfile(newProfile);
+          } catch (err) {
+            console.error("[auth] Failed to create profile:", err);
+          }
           setUser(newProfile);
         }
       }
@@ -100,13 +143,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
         if (session?.user) {
-          // Handle all events that carry a valid session:
-          // INITIAL_SESSION (first load / OAuth redirect), SIGNED_IN, TOKEN_REFRESHED
           const profile = await fetchProfile(session.user.id);
           if (profile) {
-            setUser(profile);
+            const merged = mergeWithLocalFlag(profile);
+            setUser(merged);
+            // Background sync if localStorage overrode DB
+            if (merged.onboardingComplete && !profile.onboardingComplete) {
+              upsertProfile(merged).catch(() => { /* best effort */ });
+            }
           } else {
-            // Profile doesn't exist yet — create it (handles first-time Google OAuth)
             const newProfile: UserProfile = {
               id: session.user.id,
               email: session.user.email ?? "",
@@ -115,10 +160,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               assetClasses: [],
               riskTolerance: "balanced",
               experienceLevel: "intermediate",
-              onboardingComplete: false,
+              onboardingComplete: getOnboardingFlag(session.user.id),
               createdAt: new Date().toISOString(),
             };
-            await upsertProfile(newProfile);
+            try {
+              await upsertProfile(newProfile);
+            } catch (err) {
+              console.error("[auth] Failed to create profile on auth change:", err);
+            }
             setUser(newProfile);
           }
         } else if (event === "SIGNED_OUT") {
@@ -134,15 +183,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoading(true);
     try {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) {
-        // Surface the real error for better UX
-        throw new Error(error.message);
-      }
-      // If signup required email confirmation, the session will be null
+      if (error) throw new Error(error.message);
       if (!data.session) {
         throw new Error("Email not confirmed. Please check your inbox and click the confirmation link before signing in.");
       }
-      // onAuthStateChange will set the user
     } finally {
       setIsLoading(false);
     }
@@ -153,9 +197,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
-        options: {
-          redirectTo: `${window.location.origin}/dashboard`,
-        },
+        options: { redirectTo: `${window.location.origin}/dashboard` },
       });
       if (error) throw new Error(error.message);
     } finally {
@@ -164,9 +206,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
+    if (user) clearOnboardingFlag(user.id);
     await supabase.auth.signOut();
-    // onAuthStateChange clears the user
-  }, []);
+  }, [user]);
 
   const signup = useCallback(
     async (email: string, password: string, displayName: string) => {
@@ -175,15 +217,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const { error, data } = await supabase.auth.signUp({
           email,
           password,
-          options: {
-            data: { full_name: displayName },
-          },
+          options: { data: { full_name: displayName } },
         });
         if (error) throw new Error(error.message);
-
         if (data.user && data.session) {
-          // Email confirmation is OFF — session is available immediately
-          // Create profile now (we have a valid JWT)
           const newProfile: UserProfile = {
             id: data.user.id,
             email: data.user.email ?? email,
@@ -197,8 +234,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await upsertProfile(newProfile);
           setUser(newProfile);
         } else if (data.user && !data.session) {
-          // Email confirmation is ON — session not yet available
-          // Profile will be created on first login after confirmation
           throw new Error("Account created! Please check your email and click the confirmation link before signing in.");
         }
       } finally {
@@ -224,13 +259,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       experienceLevel: answers.experienceLevel,
       onboardingComplete: true,
     };
-    // Always update local state first so the UI responds immediately
+    // 1. Persist to localStorage FIRST (survives refresh even if DB fails)
+    setOnboardingFlag(user.id, true);
+    // 2. Update local state immediately
     setUser(updated);
+    // 3. Try DB save (best effort)
     try {
       await upsertProfile(updated);
     } catch (err) {
-      console.error("[completeOnboarding] DB save failed (local state already updated):", err);
-      // Don't re-throw — local state is already set, user can proceed
+      console.error("[completeOnboarding] DB save failed (localStorage + local state already updated):", err);
     }
   }, [user]);
 

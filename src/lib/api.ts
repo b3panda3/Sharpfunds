@@ -376,6 +376,8 @@ const SYSTEM_PROMPT = `You are Sharpfunds AI, a knowledgeable financial data ass
 CRITICAL RULES:
 - NEVER provide specific buy/sell/hold recommendations
 - NEVER predict specific price targets
+- When live price data is provided in the user message, use those EXACT numbers — do NOT make up or guess prices
+- When no live data is provided, say you don't have current data rather than guessing
 - Always include "_Informational only. Not investment advice._" at the end of responses
 - Be concise but informative (2-4 paragraphs max)
 - Reference specific data points when available
@@ -763,14 +765,16 @@ export async function getAIChatResponse(
 
 export async function getAIResponse(
   message: string,
-  userContext?: { trackedAssets: string[]; riskTolerance: string }
+  userContext?: { trackedAssets: string[]; riskTolerance: string },
+  priceContext?: string
 ): Promise<string> {
   try {
     const contextStr = userContext
       ? `User tracks: ${userContext.trackedAssets.join(", ")}. Risk: ${userContext.riskTolerance}.`
       : "";
+    const priceStr = priceContext || "";
     return await callAI([
-      { role: "user", content: `${contextStr} ${message}` }
+      { role: "user", content: `${contextStr}${priceStr} ${message}` }
     ]);
   } catch {
     return "I'm having trouble connecting right now. Please try again. _Informational only. Not investment advice._";
