@@ -43,7 +43,7 @@ async function fetchProfile(userId: string): Promise<UserProfile | null> {
 }
 
 async function upsertProfile(profile: Partial<UserProfile> & { id: string }): Promise<void> {
-  const { error } = await supabase.from("user_profiles").upsert(
+  const { error, data } = await supabase.from("user_profiles").upsert(
     {
       id: profile.id,
       email: profile.email,
@@ -57,7 +57,11 @@ async function upsertProfile(profile: Partial<UserProfile> & { id: string }): Pr
     },
     { onConflict: "id" }
   );
-  if (error) throw new Error(error.message);
+  if (error) {
+    console.error("[upsertProfile] Failed:", error.message, error.code, error.hint);
+    throw new Error(error.message);
+  }
+  console.log("[upsertProfile] Success for user", profile.id);
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -220,8 +224,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       experienceLevel: answers.experienceLevel,
       onboardingComplete: true,
     };
-    await upsertProfile(updated);
+    // Always update local state first so the UI responds immediately
     setUser(updated);
+    try {
+      await upsertProfile(updated);
+    } catch (err) {
+      console.error("[completeOnboarding] DB save failed (local state already updated):", err);
+      // Don't re-throw — local state is already set, user can proceed
+    }
   }, [user]);
 
   return (

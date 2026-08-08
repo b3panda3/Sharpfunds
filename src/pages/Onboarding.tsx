@@ -334,8 +334,26 @@ function StepExperienceLevel({
 
 export default function Onboarding() {
   const navigate = useNavigate();
-  const { completeOnboarding } = useAuth();
+  const { completeOnboarding, isAuthenticated, isInitializing } = useAuth();
   const { setInitialItems } = useWatchlist();
+
+  // Auth guard: redirect unauthenticated users to login
+  if (isInitializing) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-4">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-accent/20 animate-pulse-glow">
+            <TrendingUp size={24} className="text-accent animate-pulse" />
+          </div>
+          <p className="text-sm text-muted">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+  if (!isAuthenticated) {
+    navigate("/login", { replace: true });
+    return null;
+  }
 
   const [state, setState] = useState<StepState>({
     step: 0,
