@@ -378,41 +378,61 @@ export default function Onboarding() {
     }
   };
 
-  const handleSkip = () => {
-    // Fill in defaults and finish
-    completeOnboarding({
-      assetClasses: state.assetClasses.length > 0 ? state.assetClasses : DEFAULTS.assetClasses,
-      riskTolerance: state.riskTolerance ?? DEFAULTS.riskTolerance,
-      experienceLevel: state.experienceLevel ?? DEFAULTS.experienceLevel,
-    });
-    if (state.trackedAssets.length > 0) {
-      setInitialItems(
-        state.trackedAssets.map((a) => ({
-          symbol: a.symbol,
-          name: a.name,
-          assetClass: a.assetClass as AssetClass,
-        }))
-      );
+  const [isCompleting, setIsCompleting] = useState(false);
+
+  const handleSkip = async () => {
+    setIsCompleting(true);
+    try {
+      // Fill in defaults and finish
+      await completeOnboarding({
+        assetClasses: state.assetClasses.length > 0 ? state.assetClasses : DEFAULTS.assetClasses,
+        riskTolerance: state.riskTolerance ?? DEFAULTS.riskTolerance,
+        experienceLevel: state.experienceLevel ?? DEFAULTS.experienceLevel,
+      });
+      if (state.trackedAssets.length > 0) {
+        setInitialItems(
+          state.trackedAssets.map((a) => ({
+            symbol: a.symbol,
+            name: a.name,
+            assetClass: a.assetClass as AssetClass,
+          }))
+        );
+      }
+      navigate("/dashboard");
+    } catch (err) {
+      console.error("Onboarding skip failed:", err);
+      // Still navigate — profile will use defaults next load
+      navigate("/dashboard");
+    } finally {
+      setIsCompleting(false);
     }
-    navigate("/dashboard");
   };
 
-  const handleFinish = () => {
-    completeOnboarding({
-      assetClasses: state.assetClasses,
-      riskTolerance: state.riskTolerance ?? DEFAULTS.riskTolerance,
-      experienceLevel: state.experienceLevel ?? DEFAULTS.experienceLevel,
-    });
-    if (state.trackedAssets.length > 0) {
-      setInitialItems(
-        state.trackedAssets.map((a) => ({
-          symbol: a.symbol,
-          name: a.name,
-          assetClass: a.assetClass as AssetClass,
-        }))
-      );
+  const handleFinish = async () => {
+    setIsCompleting(true);
+    try {
+      await completeOnboarding({
+        assetClasses: state.assetClasses,
+        riskTolerance: state.riskTolerance ?? DEFAULTS.riskTolerance,
+        experienceLevel: state.experienceLevel ?? DEFAULTS.experienceLevel,
+      });
+      if (state.trackedAssets.length > 0) {
+        setInitialItems(
+          state.trackedAssets.map((a) => ({
+            symbol: a.symbol,
+            name: a.name,
+            assetClass: a.assetClass as AssetClass,
+          }))
+        );
+      }
+      navigate("/dashboard");
+    } catch (err) {
+      console.error("Onboarding finish failed:", err);
+      // Still navigate — will re-prompt on next load if profile wasn't saved
+      navigate("/dashboard");
+    } finally {
+      setIsCompleting(false);
     }
-    navigate("/dashboard");
   };
 
   const stepLabels = ["Classes", "Risk", "Assets", "Experience"];
@@ -523,17 +543,18 @@ export default function Onboarding() {
             <div className="flex items-center gap-3">
               <button
                 onClick={handleSkip}
-                className="text-sm text-muted-lighter hover:text-muted transition-colors"
+                disabled={isCompleting}
+                className="text-sm text-muted-lighter hover:text-muted transition-colors disabled:opacity-40"
               >
                 Skip for now
               </button>
               <button
                 onClick={handleNext}
-                disabled={!canNext()}
+                disabled={!canNext() || isCompleting}
                 className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-background transition-all duration-200 hover:bg-accent-hover active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100"
               >
-                {state.step === TOTAL_STEPS - 1 ? "Finish" : "Continue"}
-                {state.step < TOTAL_STEPS - 1 && <ArrowRight size={16} />}
+                {isCompleting ? "Saving..." : state.step === TOTAL_STEPS - 1 ? "Finish" : "Continue"}
+                {!isCompleting && state.step < TOTAL_STEPS - 1 && <ArrowRight size={16} />}
               </button>
             </div>
           </div>
