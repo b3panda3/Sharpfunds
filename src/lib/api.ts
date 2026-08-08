@@ -446,18 +446,20 @@ async function fetchPriceHistoryFromAV(symbol: string, range: TimeRange): Promis
   // Map TimeRange to Alpha Vantage function
   const isCrypto = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"].includes(symbol);
   const isForex = symbol.includes("/");
+  const isShortTerm = range === "1D" || range === "7D";
+  const isLongTerm = range === "90D" || range === "1Y";
   
   let url: string;
   if (isCrypto) {
-    const func = range === "1D" || range === "1W" ? "DIGITAL_CURRENCY_INTRADAY" : "DIGITAL_CURRENCY_DAILY";
+    const func = isShortTerm ? "DIGITAL_CURRENCY_INTRADAY" : "DIGITAL_CURRENCY_DAILY";
     url = `https://www.alphavantage.co/query?function=${func}&symbol=${symbol}&market=USD&apikey=${ALPHA_VANTAGE_KEY}`;
   } else if (isForex) {
     const [from, to] = symbol.split("/");
     url = `https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol=${from}&to_symbol=${to}&interval=60min&outputsize=full&apikey=${ALPHA_VANTAGE_KEY}`;
   } else {
-    const func = range === "1D" || range === "1W" ? "TIME_SERIES_INTRADAY" : "TIME_SERIES_DAILY";
+    const func = isShortTerm ? "TIME_SERIES_INTRADAY" : "TIME_SERIES_DAILY";
     const interval = range === "1D" ? "5min" : "60min";
-    url = `https://www.alphavantage.co/query?function=${func}&symbol=${symbol}&interval=${interval}&outputsize=${range === "1M" || range === "3M" || range === "1Y" ? "full" : "compact"}&apikey=${ALPHA_VANTAGE_KEY}`;
+    url = `https://www.alphavantage.co/query?function=${func}&symbol=${symbol}&interval=${interval}&outputsize=${isLongTerm ? "full" : "compact"}&apikey=${ALPHA_VANTAGE_KEY}`;
   }
 
   const res = await fetch(url);
@@ -470,16 +472,16 @@ async function fetchPriceHistoryFromAV(symbol: string, range: TimeRange): Promis
 
   const timeSeries = data[timeSeriesKey];
   const points: ChartPoint[] = [];
-  const now = Date.now();
   let count = 0;
-  const maxPoints = range === "1D" ? 78 : range === "1W" ? 168 : range === "1M" ? 30 : range === "3M" ? 90 : 365;
+  const maxPoints = range === "1D" ? 78 : range === "7D" ? 168 : range === "30D" ? 30 : range === "90D" ? 90 : 365;
 
   for (const [dateStr, values] of Object.entries(timeSeries)) {
     if (count >= maxPoints) break;
     const v = values as Record<string, string>;
     const closeKey = Object.keys(v).find((k) => k.includes("close")) || Object.keys(v)[3];
     if (closeKey) {
-      points.push({ date: new Date(dateStr).getTime(), price: parseFloat(v[closeKey]) });
+      const ts = new Date(dateStr).getTime();
+      points.push({ timestamp: new Date(ts).toISOString(), value: parseFloat(v[closeKey]) });
     }
     count++;
   }
@@ -711,8 +713,8 @@ export async function getPriceHistory(symbol: string, range: TimeRange): Promise
   // Generate deterministic fallback chart data
   const points: ChartPoint[] = [];
   const now = Date.now();
-  const numPoints = range === "1D" ? 78 : range === "1W" ? 168 : range === "1M" ? 30 : range === "3M" ? 90 : 365;
-  const intervalMs = range === "1D" ? 5 * 60 * 1000 : range === "1W" ? 60 * 60 * 1000 : range === "1M" ? 24 * 60 * 60 * 1000 : range === "3M" ? 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+  const numPoints = range === "1D" ? 78 : range === "7D" ? 168 : range === "30D" ? 30 : range === "90D" ? 90 : 365;
+  const intervalMs = range === "1D" ? 5 * 60 * 1000 : range === "7D" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
 
   const mover = await getAssetBySymbol(symbol);
   const basePrice = mover?.price || 100;
@@ -721,7 +723,8 @@ export async function getPriceHistory(symbol: string, range: TimeRange): Promise
   for (let i = 0; i < numPoints; i++) {
     const volatility = 0.003;
     price = price * (1 + (Math.sin(i * 0.1) * volatility));
-    points.push({ date: now - (numPoints - i) * intervalMs, price });
+    const ts = now - (numPoints - i) * intervalMs;
+    points.push({ timestamp: new Date(ts).toISOString(), value: price });
   }
   return points;
 }
@@ -737,7 +740,7 @@ export async function getKeyStats(symbol: string): Promise<{ high52w: number; lo
     const points = await getPriceHistory(symbol, "1Y");
     if (points.length < 10) return null;
 
-    const prices = points.map((p) => p.price);
+    const prices = points.map((p) => p.value);
     const high52w = Math.max(...prices);
     const low52w = Math.min(...prices);
 

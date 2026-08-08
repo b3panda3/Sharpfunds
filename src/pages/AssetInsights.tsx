@@ -143,7 +143,7 @@ export default function AssetInsights() {
 
       // Parallel: stats, fundamentals, news, synthesis
       const [statsData, fundData, newsData, synthData] = await Promise.all([
-        getKeyStats(sym, assetData.price, assetData.assetClass),
+        getKeyStats(sym),
         getFundamentals(sym),
         getAssetRelatedNews(sym),
         getAISynthesis(sym),
@@ -170,7 +170,7 @@ export default function AssetInsights() {
 
     async function loadChart() {
       setChartLoading(true);
-      const data = await getPriceHistory(sym, curAsset.price, curAsset.assetClass, range);
+      const data = await getPriceHistory(sym, range);
       if (!cancelled) {
         setChartData(data);
         setChartLoading(false);
