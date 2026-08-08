@@ -419,7 +419,7 @@ async function callGemini(messages: { role: string; content: string }[]): Promis
 }
 
 async function callAI(messages: { role: string; content: string }[]): Promise<string> {
-  try {
+ try {
     return await callGroq(messages);
   } catch {
     try {
@@ -540,7 +540,7 @@ Top losers: ${topLosers.map((m) => `${m.symbol} ${m.changePercent.toFixed(2)}%`)
       meme_coins: "Meme coin activity remains elevated, driven by social sentiment and community engagement rather than fundamental developments.",
       commodities: "Commodity markets are responding to geopolitical tensions and supply-demand dynamics, with precious metals benefiting from safe-haven flows.",
     };
-    return fallbacks[assetClass] || "Markets are active. Monitor key levels and news flow for direction.",
+    return fallbacks[assetClass] || "Markets are active. Monitor key levels and news flow for direction.";
   }
 }
 
