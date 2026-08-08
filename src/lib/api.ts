@@ -21,9 +21,10 @@ const NEWS_TTL = 10 * 60 * 1000;       // 10 min for news
 const AI_TTL = 30 * 60 * 1000;         // 30 min for AI analysis
 
 // ─── API Keys (from env vars, with fallbacks) ───
-const FINNHUB_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_FINNHUB_API_KEY) || "d28db1hr01qhg52rbmu0d28db1hr01qhg52rbmug";
-const ALPHA_VANTAGE_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_ALPHA_VANTAGE_API_KEY) || "J7YQ4V3X8M5Z1W2K";
+const FINNHUB_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_FINNHUB_API_KEY) || "d9q3jo9r01qkp6jbg5lgd9q3jo9r01qkp6jbg5m0";
+const ALPHA_VANTAGE_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_ALPHA_VANTAGE_API_KEY) || "GMKYQ3336PPF8CD3";
 const COINGECKO_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_COINGECKO_API_KEY) || "";
+const COINMARKETCAP_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_COINMARKETCAP_API_KEY) || "";
 const NEWS_API_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_NEWS_API_KEY) || "";
 const GROQ_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_GROQ_API_KEY) || "";
 const GEMINI_KEY = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_GEMINI_API_KEY) || "";
@@ -129,6 +130,7 @@ async function fetchCryptoFromCoinGecko(): Promise<MarketMover[]> {
   );
   if (!res.ok) throw new Error(`CoinGecko ${res.status}`);
   const data = await res.json();
+  if (!Array.isArray(data) || data.length === 0) throw new Error("CoinGecko empty");
 
   return data.map((c: any) => {
     const sym = c.symbol.toUpperCase();
@@ -140,6 +142,91 @@ async function fetchCryptoFromCoinGecko(): Promise<MarketMover[]> {
       change: c.current_price - (c.current_price / (1 + (c.price_change_percentage_24h || 0) / 100)),
       changePercent: c.price_change_percentage_24h || 0,
       volume: c.total_volume || 0,
+      assetClass: (isMeme ? "meme_coins" : "crypto") as AssetClass,
+    };
+  });
+}
+
+/* ─── Crypto fallback 2: Binance (free, no auth needed) ─── */
+async function fetchCryptoFromBinance(): Promise<MarketMover[]> {
+  const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "DOTUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT"];
+  const memeSymbols = ["DOGEUSDT", "SHIBUSDT", "PEPEUSDT", "BONKUSDT", "FLOKIUSDT"];
+  const results: MarketMover[] = [];
+
+  // Binance 24hr ticker endpoint (single call for all pairs)
+  try {
+    const res = await fetch("https://api.binance.com/api/v3/ticker/24hr");
+    if (!res.ok) throw new Error(`Binance ${res.status}`);
+    const allTickers = await res.json();
+    if (!Array.isArray(allTickers)) throw new Error("Binance invalid");
+
+    const tickerMap = new Map<string, any>();
+    for (const t of allTickers) {
+      tickerMap.set(t.symbol, t);
+    }
+
+    for (const sym of symbols) {
+      const t = tickerMap.get(sym);
+      if (!t || !t.lastPrice) continue;
+      const display = sym.replace("USDT", "");
+      const isMeme = memeSymbols.includes(sym);
+      results.push({
+        symbol: display,
+        name: display,
+        price: parseFloat(t.lastPrice),
+        change: parseFloat(t.priceChange || 0),
+        changePercent: parseFloat(t.priceChangePercent || 0),
+        volume: parseFloat(t.quoteVolume || 0),
+        assetClass: (isMeme ? "meme_coins" : "crypto") as AssetClass,
+      });
+    }
+
+    // Add meme coins
+    for (const sym of memeSymbols) {
+      if (symbols.includes(sym)) continue; // already added
+      const t = tickerMap.get(sym);
+      if (!t || !t.lastPrice) continue;
+      const display = sym.replace("USDT", "");
+      results.push({
+        symbol: display,
+        name: display,
+        price: parseFloat(t.lastPrice),
+        change: parseFloat(t.priceChange || 0),
+        changePercent: parseFloat(t.priceChangePercent || 0),
+        volume: parseFloat(t.quoteVolume || 0),
+        assetClass: "meme_coins" as const,
+      });
+    }
+  } catch (err) {
+    console.warn("[Binance] crypto fetch failed:", err);
+    throw err;
+  }
+
+  return results;
+}
+
+/* ─── Crypto fallback 3: CoinMarketCap ─── */
+async function fetchCryptoFromCoinMarketCap(): Promise<MarketMover[]> {
+  if (!COINMARKETCAP_KEY) throw new Error("No CMC key");
+  const res = await fetch(
+    "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest?limit=20&convert=USD",
+    { headers: { "X-CMC_PRO_API_KEY": COINMARKETCAP_KEY } }
+  );
+  if (!res.ok) throw new Error(`CMC ${res.status}`);
+  const data = await res.json();
+  if (!data.data) throw new Error("CMC no data");
+
+  return data.data.map((c: any) => {
+    const sym = c.symbol;
+    const isMeme = ["PEPE", "WIF", "BONK", "FLOKI", "DOGE", "SHIB", "MEME"].includes(sym);
+    const quote = c.quote?.USD || {};
+    return {
+      symbol: sym,
+      name: c.name,
+      price: quote.price || 0,
+      change: quote.price * ((quote.percent_change_24h || 0) / 100),
+      changePercent: quote.percent_change_24h || 0,
+      volume: quote.volume_24h || 0,
       assetClass: (isMeme ? "meme_coins" : "crypto") as AssetClass,
     };
   });
@@ -595,7 +682,17 @@ export async function getTopMovers(assetClass?: AssetClass): Promise<MarketMover
       try { data.push(...await fetchStocksFromFinnhub()); } catch { data.push(...await fetchStocksFromAlphaVantage()); }
     }
     if (!assetClass || assetClass === "crypto" || assetClass === "meme_coins") {
-      try { data.push(...await fetchCryptoFromCoinGecko()); } catch { /* fallback handled by empty array */ }
+      try { data.push(...await fetchCryptoFromCoinGecko()); }
+      catch (e) { console.warn("[getTopMovers] CoinGecko failed:", e);
+      }
+      if (data.filter(d => d.assetClass === "crypto" || d.assetClass === "meme_coins").length === 0) {
+        try { data.push(...await fetchCryptoFromBinance()); }
+        catch (e) { console.warn("[getTopMovers] Binance failed:", e); }
+      }
+      if (data.filter(d => d.assetClass === "crypto" || d.assetClass === "meme_coins").length === 0) {
+        try { data.push(...await fetchCryptoFromCoinMarketCap()); }
+        catch (e) { console.warn("[getTopMovers] CoinMarketCap failed:", e); }
+      }
     }
     if (!assetClass || assetClass === "forex") {
       try { data.push(...await fetchForexFromFrankfurter()); } catch { /* fallback */ }

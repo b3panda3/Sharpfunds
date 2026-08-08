@@ -170,10 +170,16 @@ export default function AssetInsights() {
 
     async function loadChart() {
       setChartLoading(true);
-      const data = await getPriceHistory(sym, range);
-      if (!cancelled) {
-        setChartData(data);
-        setChartLoading(false);
+      try {
+        const data = await getPriceHistory(sym, range);
+        if (!cancelled) {
+          setChartData(data);
+        }
+      } catch (err) {
+        console.warn("[AssetInsights] Chart load failed:", err);
+        if (!cancelled) setChartData([]);
+      } finally {
+        if (!cancelled) setChartLoading(false);
       }
     }
     loadChart();
