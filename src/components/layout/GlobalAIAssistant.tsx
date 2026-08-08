@@ -146,16 +146,17 @@ export default function GlobalAIAssistant() {
     } catch {
       // Client-side fallback using Groq/Gemini directly
       try {
-        // Fetch real prices for context
+        // Fetch real prices for context — include ALL movers for better coverage
         let priceContext = "";
         try {
           const movers = await getTopMovers();
           if (movers && movers.length > 0) {
-            const topMovers = movers.slice(0, 8);
-            priceContext = "\n\nCurrent market data (live):\n" +
+            const topMovers = movers.slice(0, 15);
+            priceContext = "\n\nCurrent market data (live, do NOT fabricate prices for any asset not listed below):\n" +
               topMovers.map((m: MarketMover) =>
-                `  ${m.symbol}: $${m.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} (${m.changePercent >= 0 ? "+" : ""}${m.changePercent.toFixed(2)}%)`
-              ).join("\n");
+                `  ${m.symbol} (${m.name || m.symbol}): $${m.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} (${m.changePercent >= 0 ? "+" : ""}${m.changePercent.toFixed(2)}%)`
+              ).join("\n") +
+              "\n  If asked about an asset NOT in this list, say you don't have current data for it.";
           }
         } catch { /* price fetch optional */ }
 
