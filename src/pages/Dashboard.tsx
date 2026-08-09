@@ -347,12 +347,13 @@ export default function Dashboard() {
       const sorted = [...allMovers].sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent));
       const placardCandidates = sorted.slice(0, 6);
 
-      // Fetch commentary for each
+      // Fetch commentary for each placard's asset class (deduped)
+      const classSet = new Set(placardCandidates.map(a => a.assetClass));
       const commentaryMap: Record<string, string> = {};
       await Promise.all(
-        placardCandidates.map(async (asset) => {
-          const text = await getAIPlacardCommentary(asset.symbol);
-          commentaryMap[asset.symbol] = text;
+        Array.from(classSet).map(async (cls) => {
+          const text = await getAIPlacardCommentary(cls);
+          commentaryMap[cls] = text;
         })
       );
       setPlacardCommentaries(commentaryMap);
@@ -482,7 +483,7 @@ export default function Dashboard() {
                   <PlacardCard
                     key={asset.symbol}
                     asset={asset}
-                    commentary={placardCommentaries[asset.symbol] ?? "Loading AI insight..."}
+                    commentary={placardCommentaries[asset.assetClass] ?? "Loading AI insight..."}
                     index={i}
                     onViewDetails={() => navigate(`/asset/${asset.symbol}`)}
                   />

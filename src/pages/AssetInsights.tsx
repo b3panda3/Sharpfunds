@@ -141,12 +141,12 @@ export default function AssetInsights() {
       setAsset(assetData);
       setAssetLoading(false);
 
-      // Parallel: stats, fundamentals, news, synthesis
+      // Load each data source independently so one failure doesn't block others
       const [statsData, fundData, newsData, synthData] = await Promise.all([
-        getKeyStats(sym),
-        getFundamentals(sym),
-        getAssetRelatedNews(sym),
-        getAISynthesis(sym),
+        getKeyStats(sym).catch(() => null),
+        getFundamentals(sym).catch(() => null),
+        getAssetRelatedNews(sym).catch(() => []),
+        getAISynthesis(sym).catch(() => "AI analysis is temporarily unavailable. _Informational only. Not investment advice._"),
       ]);
       if (cancelled) return;
 
@@ -165,7 +165,6 @@ export default function AssetInsights() {
   useEffect(() => {
     if (!symbol || !asset) return;
     const sym: string = symbol;
-    const curAsset: MarketMover = asset;
     let cancelled = false;
 
     async function loadChart() {
@@ -349,6 +348,10 @@ export default function AssetInsights() {
             <div className="flex h-full items-center justify-center">
               <div className="h-48 w-full animate-pulse rounded bg-surface-elevated" />
             </div>
+          ) : chartData.length === 0 ? (
+            <div className="flex h-full items-center justify-center">
+              <p className="text-sm text-muted">No chart data available for this time range.</p>
+            </div>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData}>
@@ -424,7 +427,9 @@ export default function AssetInsights() {
         </h2>
 
         {!fundamentals ? (
-          <div className="mt-4"><SectionSkeleton lines={3} /></div>
+          <div className="mt-4 text-center py-6">
+            <p className="text-sm text-muted">No fundamental data available for this asset.</p>
+          </div>
         ) : (
           <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3 lg:grid-cols-4">
             {/* Stocks / ETF */}
@@ -435,6 +440,15 @@ export default function AssetInsights() {
                 {fundamentals.peRatio != null && <FundRow label="P/E Ratio" value={fundamentals.peRatio.toFixed(1)} />}
                 {fundamentals.dividendYield != null && <FundRow label="Div. Yield" value={`${fundamentals.dividendYield}%`} />}
                 {fundamentals.beta != null && <FundRow label="Beta" value={fundamentals.beta.toFixed(2)} />}
+              </>
+            )}
+
+            {/* Crypto — Binance volume data (no CoinGecko enrichment) */}
+            {fundamentals.volume24h != null && fundamentals.circulatingSupply == null && (
+              <>
+                {fundamentals.marketCap != null && <FundRow label="Market Cap" value={fmtLarge(fundamentals.marketCap)} />}
+                <FundRow label="24h Volume" value={fmtLarge(fundamentals.volume24h)} />
+                {fundamentals.allTimeHigh != null && <FundRow label="All-Time High" value={fmtPrice(fundamentals.allTimeHigh)} />}
               </>
             )}
 
