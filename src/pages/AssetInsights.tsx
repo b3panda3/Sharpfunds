@@ -161,7 +161,7 @@ export default function AssetInsights() {
     return () => { cancelled = true; };
   }, [symbol]);
 
-  // Load chart data when range changes
+  // Load chart data when range or asset changes (asset in deps ensures chart loads after asset fetch)
   useEffect(() => {
     if (!symbol || !asset) return;
     const sym: string = symbol;
@@ -184,7 +184,7 @@ export default function AssetInsights() {
     loadChart();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, range]);
+  }, [symbol, range, asset]);
 
   // Scroll chat
   useEffect(() => {

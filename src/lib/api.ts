@@ -1035,8 +1035,62 @@ export async function getFundamentals(symbol: string): Promise<AssetFundamentals
     } catch { /* Binance fundamentals optional */ }
   }
 
+  // Static fallback — fundamentals ALWAYS available as last resort
+  const fallback = FUNDAMENTALS_FALLBACK[symbol];
+  if (fallback) {
+    setCache(cacheKey, fallback, PRICE_TTL);
+    return fallback;
+  }
+
+  // For forex/commodities without specific fallback: return a minimal object so UI shows something
+  if (assetClass === "forex") {
+    const forexFund: AssetFundamentals = { yearHigh: 0, yearLow: 0 };
+    setCache(cacheKey, forexFund, PRICE_TTL);
+    return forexFund;
+  }
+
   return null;
 }
+
+/* ───── Fundamentals Static Fallback ───── */
+const FUNDAMENTALS_FALLBACK: Record<string, AssetFundamentals> = {
+  // Stocks
+  AAPL:  { sector: "Technology",              marketCap: 3_450_000_000_000, peRatio: 33.2, dividendYield: 0.55, beta: 1.24 },
+  MSFT:  { sector: "Technology",              marketCap: 3_310_000_000_000, peRatio: 37.8, dividendYield: 0.72, beta: 0.89 },
+  GOOGL: { sector: "Communication Services", marketCap: 2_190_000_000_000, peRatio: 24.1, dividendYield: 0.45, beta: 1.06 },
+  AMZN:  { sector: "Consumer Cyclical",       marketCap: 2_060_000_000_000, peRatio: 58.3, dividendYield: 0,    beta: 1.16 },
+  TSLA:  { sector: "Consumer Cyclical",       marketCap: 790_000_000_000,   peRatio: 65.4, dividendYield: 0,    beta: 2.05 },
+  NVDA:  { sector: "Technology",              marketCap: 2_900_000_000_000, peRatio: 62.1, dividendYield: 0.03, beta: 1.68 },
+  META:  { sector: "Communication Services", marketCap: 1_280_000_000_000, peRatio: 27.4, dividendYield: 0.39, beta: 1.22 },
+  JPM:   { sector: "Financial Services",      marketCap: 590_000_000_000,   peRatio: 12.1, dividendYield: 2.15, beta: 1.08 },
+  // ETFs
+  SPY:   { sector: "US Large Cap Index",  marketCap: 520_000_000_000,   peRatio: 25.3, beta: 1.0 },
+  QQQ:   { sector: "Nasdaq-100 Index",     marketCap: 290_000_000_000,   peRatio: 31.5, beta: 1.12 },
+  DIA:   { sector: "Dow Jones Index",      marketCap: 310_000_000_000,   peRatio: 22.8, beta: 0.92 },
+  IVV:   { sector: "US Large Cap Index",  marketCap: 510_000_000_000,   peRatio: 25.1, beta: 1.0 },
+  VOO:   { sector: "US Large Cap Index",  marketCap: 490_000_000_000,   peRatio: 25.0, beta: 1.0 },
+  // Crypto
+  BTC:   { marketCap: 1_280_000_000_000, volume24h: 28_500_000_000, circulatingSupply: 19_800_000, totalSupply: 21_000_000, allTimeHigh: 73737 },
+  ETH:   { marketCap: 230_000_000_000,   volume24h: 14_200_000_000, circulatingSupply: 120_200_000, totalSupply: 120_200_000, allTimeHigh: 4878 },
+  SOL:   { marketCap: 82_000_000_000,    volume24h: 3_800_000_000,  circulatingSupply: 470_000_000, totalSupply: 590_000_000, allTimeHigh: 260 },
+  XRP:   { marketCap: 31_000_000_000,    volume24h: 1_500_000_000,  circulatingSupply: 56_000_000_000, totalSupply: 100_000_000_000, allTimeHigh: 3.84 },
+  ADA:   { marketCap: 13_500_000_000,    volume24h: 320_000_000,    circulatingSupply: 35_600_000_000, totalSupply: 45_000_000_000, allTimeHigh: 3.10 },
+  DOGE:  { marketCap: 18_200_000_000,    volume24h: 860_000_000,    circulatingSupply: 144_000_000_000_000, totalSupply: 144_000_000_000_000, allTimeHigh: 0.7376 },
+  DOT:   { marketCap: 9_500_000_000,     volume24h: 160_000_000,    circulatingSupply: 1_400_000_000, totalSupply: 1_500_000_000, allTimeHigh: 55.0 },
+  AVAX:  { marketCap: 9_100_000_000,     volume24h: 240_000_000,    circulatingSupply: 400_000_000, totalSupply: 720_000_000, allTimeHigh: 146.0 },
+  LINK:  { marketCap: 8_900_000_000,     volume24h: 190_000_000,    circulatingSupply: 630_000_000, totalSupply: 1_000_000_000, allTimeHigh: 52.88 },
+  LTC:   { marketCap: 4_800_000_000,     volume24h: 350_000_000,    circulatingSupply: 75_000_000, totalSupply: 84_000_000, allTimeHigh: 412.96 },
+  // Meme coins
+  PEPE:  { marketCap: 4_100_000_000,     volume24h: 1_200_000_000, circulatingSupply: 420_690_000_000_000, totalSupply: 420_690_000_000_000, allTimeHigh: 0.00002813 },
+  SHIB:  { marketCap: 8_500_000_000,     volume24h: 460_000_000,    circulatingSupply: 589_000_000_000_000, totalSupply: 1_000_000_000_000_000, allTimeHigh: 0.00008616 },
+  WIF:   { marketCap: 1_800_000_000,     volume24h: 200_000_000,    circulatingSupply: 1_000_000_000, totalSupply: 1_000_000_000, allTimeHigh: 4.85 },
+  BONK:  { marketCap: 1_600_000_000,     volume24h: 350_000_000,    circulatingSupply: 66_000_000_000_000, totalSupply: 93_000_000_000_000, allTimeHigh: 0.00004704 },
+  FLOKI: { marketCap: 1_600_000_000,     volume24h: 130_000_000,    circulatingSupply: 9_500_000_000_000, totalSupply: 9_500_000_000_000, allTimeHigh: 0.0003462 },
+  // Commodities (approximate)
+  "GC=F": { sector: "Precious Metals", marketCap: 15_000_000_000_000 },
+  "SI=F": { sector: "Precious Metals", marketCap: 1_200_000_000_000 },
+  "HG=F": { sector: "Base Metals",     marketCap: 200_000_000_000 },
+};
 
 /* ───── Related News ───── */
 
