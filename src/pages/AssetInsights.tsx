@@ -443,6 +443,15 @@ export default function AssetInsights() {
               </>
             )}
 
+            {/* Crypto — Binance volume data (no CoinGecko enrichment) */}
+            {fundamentals.volume24h != null && fundamentals.circulatingSupply == null && (
+              <>
+                {fundamentals.marketCap != null && <FundRow label="Market Cap" value={fmtLarge(fundamentals.marketCap)} />}
+                <FundRow label="24h Volume" value={fmtLarge(fundamentals.volume24h)} />
+                {fundamentals.allTimeHigh != null && <FundRow label="All-Time High" value={fmtPrice(fundamentals.allTimeHigh)} />}
+              </>
+            )}
+
             {/* Crypto */}
             {fundamentals.circulatingSupply != null && (
               <>
