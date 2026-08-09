@@ -147,6 +147,138 @@ async function fetchCryptoFromCoinGecko(): Promise<MarketMover[]> {
   });
 }
 
+/* ─── Crypto PRIMARY: GeckoTerminal (free, no API key, CORS-friendly) ─── */
+async function fetchCryptoFromGeckoTerminal(): Promise<MarketMover[]> {
+  const results: MarketMover[] = [];
+
+  // GeckoTerminal token addresses by network
+  const ethTokens: { address: string; symbol: string; name: string; cls: AssetClass }[] = [
+    { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", symbol: "ETH", name: "Ethereum", cls: "crypto" },
+    { address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", symbol: "BTC", name: "Bitcoin (WBTC)", cls: "crypto" },
+    { address: "0x514910771AF9Ca656af840dff83E8264EcF986CA", symbol: "LINK", name: "Chainlink", cls: "crypto" },
+    { address: "0x6982508145454Ce325dDbE47a25d4ec3d2311933", symbol: "PEPE", name: "Pepe", cls: "meme_coins" },
+    { address: "0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE", symbol: "SHIB", name: "Shiba Inu", cls: "meme_coins" },
+    { address: "0xcf0C122c6b73ff809C693DB761e7BaeBe62b6a2E", symbol: "FLOKI", name: "Floki Inu", cls: "meme_coins" },
+  ];
+
+  const solTokens: { address: string; symbol: string; name: string; cls: AssetClass }[] = [
+    { address: "So11111111111111111111111111111111111111112", symbol: "SOL", name: "Solana", cls: "crypto" },
+    { address: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", symbol: "WIF", name: "dogwifhat", cls: "meme_coins" },
+    { address: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", symbol: "BONK", name: "Bonk", cls: "meme_coins" },
+  ];
+
+  const bscTokens: { address: string; symbol: string; name: string; cls: AssetClass }[] = [
+    { address: "0x2170Ed0880ac9A755fd29B2688956BD959F933F8", symbol: "BTC", name: "Bitcoin (BTCS)", cls: "crypto" },
+    { address: "0x1AF1F32535468E28164A24825c7ADFEc06B9f5B0", symbol: "DOGE", name: "Dogecoin (BSC)", cls: "crypto" },
+    { address: "0x3EE2200Efb3400fAbB9AacF31297cBdD1d435D47", symbol: "ADA", name: "Cardano (BSC)", cls: "crypto" },
+    { address: "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56", symbol: "XRP", name: "XRP (BSC)", cls: "crypto" },
+  ];
+
+  // Batch fetch prices per network using simple/token_price endpoint
+  const networks: { id: string; tokens: typeof ethTokens }[] = [
+    { id: "eth", tokens: ethTokens },
+    { id: "solana", tokens: solTokens },
+    { id: "bsc", tokens: bscTokens },
+  ];
+
+  for (const net of networks) {
+    try {
+      const addresses = net.tokens.map(t => t.address.toLowerCase());
+      const url = `https://api.geckoterminal.com/api/v2/simple/networks/${net.id}/token_prices/${addresses.join(",")}`;
+      const res = await fetch(url, {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) {
+        console.warn(`[GeckoTerminal] ${net.id} returned ${res.status}`);
+        continue;
+      }
+      const json = await res.json();
+      const priceData = json?.data?.attributes?.token_prices;
+      if (!priceData || typeof priceData !== "object") continue;
+
+      for (const token of net.tokens) {
+        const addrKey = token.address.toLowerCase();
+        const priceStr = priceData[addrKey];
+        if (!priceStr) continue;
+        const price = parseFloat(priceStr);
+        if (!price || isNaN(price)) continue;
+
+        // For BTC, use the ETH WBTC price (most liquid) and skip BSC duplicate
+        if (token.symbol === "BTC" && results.some(r => r.symbol === "BTC")) continue;
+        // For DOGE/ADA/XRP, prefer BSC prices if ETH didn't have them
+        if (results.some(r => r.symbol === token.symbol)) continue;
+
+        results.push({
+          symbol: token.symbol,
+          name: token.name.includes("(") ? token.name.split(" (")[0] : token.name,
+          price,
+          change: 0, // simple/token_price doesn't include change
+          changePercent: 0,
+          volume: 0,
+          assetClass: token.cls,
+        });
+      }
+    } catch (err) {
+      console.warn(`[GeckoTerminal] ${net.id} fetch failed:`, err);
+    }
+  }
+
+  // Fetch detailed token data for 24h change/volume from GeckoTerminal trending pools
+  if (results.length > 0) {
+    try {
+      // Get trending ETH pools to fill in change data
+      const poolRes = await fetch("https://api.geckoterminal.com/api/v2/networks/eth/trending_pools?include=base_token", {
+        headers: { Accept: "application/json" },
+      });
+      if (poolRes.ok) {
+        const poolJson = await poolRes.json();
+        const pools = poolJson?.data || [];
+        for (const pool of pools) {
+          const attr = pool?.attributes;
+          const baseToken = pool?.relationships?.base_token?.data?.attributes;
+          if (!attr || !baseToken) continue;
+          const sym = baseToken.symbol?.toUpperCase();
+          if (!sym) continue;
+          const existing = results.find(r => r.symbol === sym);
+          if (existing) {
+            existing.changePercent = parseFloat(attr.price_change_percentage?.h24 || 0);
+            existing.volume = parseFloat(attr.volume_usd?.h24 || 0);
+            const priceNow = existing.price;
+            existing.change = priceNow * (existing.changePercent / 100);
+          }
+        }
+      }
+    } catch { /* optional enrichment */ }
+
+    // Also get SOL trending for solana meme coins
+    try {
+      const solRes = await fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?include=base_token", {
+        headers: { Accept: "application/json" },
+      });
+      if (solRes.ok) {
+        const solJson = await solRes.json();
+        const pools = solJson?.data || [];
+        for (const pool of pools) {
+          const attr = pool?.attributes;
+          const baseToken = pool?.relationships?.base_token?.data?.attributes;
+          if (!attr || !baseToken) continue;
+          const sym = baseToken.symbol?.toUpperCase();
+          if (!sym) continue;
+          const existing = results.find(r => r.symbol === sym);
+          if (existing) {
+            existing.changePercent = parseFloat(attr.price_change_percentage?.h24 || 0);
+            existing.volume = parseFloat(attr.volume_usd?.h24 || 0);
+            existing.change = existing.price * (existing.changePercent / 100);
+          }
+        }
+      }
+    } catch { /* optional enrichment */ }
+  }
+
+  console.log(`[GeckoTerminal] Fetched ${results.length} crypto tokens`);
+  return results;
+}
+
 /* ─── Crypto fallback 2: Binance (free, no auth needed) ─── */
 async function fetchCryptoFromBinance(): Promise<MarketMover[]> {
   const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "DOTUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT"];
@@ -525,6 +657,45 @@ function generateFallbackNews(): NewsArticle[] {
   ];
 }
 
+// ─── Rate limiter for Alpha Vantage (5 calls/min free tier) ───
+let avCallTimes: number[] = [];
+async function avFetch(url: string): Promise<Response> {
+  const now = Date.now();
+  avCallTimes = avCallTimes.filter(t => now - t < 65_000);
+  if (avCallTimes.length >= 4) {
+    const waitMs = 65_000 - (now - avCallTimes[0]) + 500;
+    console.log(`[AV Rate Limit] Waiting ${Math.ceil(waitMs / 1000)}s`);
+    await new Promise(r => setTimeout(r, waitMs));
+    avCallTimes = avCallTimes.filter(t => Date.now() - t < 65_000);
+  }
+  avCallTimes.push(Date.now());
+  return fetch(url);
+}
+
+/* ─── Chart data from Binance klines (free, reliable, no auth) ─── */
+async function fetchChartFromBinance(symbol: string, range: TimeRange): Promise<ChartPoint[]> {
+  const binanceSym = `${symbol}USDT`;
+  let interval: string;
+  let limit: number;
+  switch (range) {
+    case "1D":  interval = "5m";  limit = 78; break;
+    case "7D":  interval = "1h";  limit = 168; break;
+    case "30D": interval = "4h";  limit = 180; break;
+    case "90D": interval = "1d";  limit = 90; break;
+    case "1Y":  interval = "1d";  limit = 365; break;
+    default:    interval = "1h";  limit = 168;
+  }
+  const url = `https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${interval}&limit=${limit}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Binance klines ${res.status}`);
+  const klines = await res.json();
+  if (!Array.isArray(klines) || klines.length === 0) throw new Error("Binance klines empty");
+  return klines.map((k: any[]) => ({
+    timestamp: new Date(k[0]).toISOString(),
+    value: parseFloat(k[4]),
+  }));
+}
+
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    7. PRICE HISTORY — Alpha Vantage
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
@@ -549,9 +720,14 @@ async function fetchPriceHistoryFromAV(symbol: string, range: TimeRange): Promis
     url = `https://www.alphavantage.co/query?function=${func}&symbol=${symbol}&interval=${interval}&outputsize=${isLongTerm ? "full" : "compact"}&apikey=${ALPHA_VANTAGE_KEY}`;
   }
 
-  const res = await fetch(url);
+  const res = await avFetch(url);
   if (!res.ok) throw new Error(`Alpha Vantage ${res.status}`);
   const data = await res.json();
+
+  // Check for rate limit response
+  if (data["Note"] || data["Information"]) {
+    throw new Error("Alpha Vantage rate limited");
+  }
 
   // Parse time series data
   const timeSeriesKey = Object.keys(data).find((k) => k.includes("Time Series"));
@@ -582,12 +758,12 @@ async function fetchPriceHistoryFromAV(symbol: string, range: TimeRange): Promis
 
 async function fetchFundamentalsFromAV(symbol: string): Promise<AssetFundamentals | null> {
   try {
-    const res = await fetch(
+    const res = await avFetch(
       `https://www.alphavantage.co/query?function=OVERVIEW&symbol=${symbol}&apikey=${ALPHA_VANTAGE_KEY}`
     );
     if (!res.ok) return null;
     const d = await res.json();
-    if (!d["Symbol"]) return null;
+    if (!d["Symbol"] || d["Note"] || d["Information"]) return null;
 
     const fundamentals: AssetFundamentals = {};
     if (d["MarketCapitalization"]) fundamentals.marketCap = parseInt(d["MarketCapitalization"]);
@@ -682,8 +858,12 @@ export async function getTopMovers(assetClass?: AssetClass): Promise<MarketMover
       try { data.push(...await fetchStocksFromFinnhub()); } catch { data.push(...await fetchStocksFromAlphaVantage()); }
     }
     if (!assetClass || assetClass === "crypto" || assetClass === "meme_coins") {
-      try { data.push(...await fetchCryptoFromCoinGecko()); }
-      catch (e) { console.warn("[getTopMovers] CoinGecko failed:", e);
+      // GeckoTerminal first (no API key, CORS-friendly, reliable)
+      try { data.push(...await fetchCryptoFromGeckoTerminal()); }
+      catch (e) { console.warn("[getTopMovers] GeckoTerminal failed:", e); }
+      if (data.filter(d => d.assetClass === "crypto" || d.assetClass === "meme_coins").length === 0) {
+        try { data.push(...await fetchCryptoFromCoinGecko()); }
+        catch (e) { console.warn("[getTopMovers] CoinGecko failed:", e); }
       }
       if (data.filter(d => d.assetClass === "crypto" || d.assetClass === "meme_coins").length === 0) {
         try { data.push(...await fetchCryptoFromBinance()); }
@@ -828,6 +1008,21 @@ export async function getPriceHistory(symbol: string, range: TimeRange): Promise
   const cached = isCached<ChartPoint[]>(cacheKey);
   if (cached) return cached;
 
+  // For crypto/meme_coins, try Binance klines first (reliable, free, no rate limit)
+  const cryptoSymbols = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "DOT", "AVAX", "LINK", "LTC", "PEPE", "SHIB", "WIF", "BONK", "FLOKI"];
+  if (cryptoSymbols.includes(symbol)) {
+    try {
+      const points = await fetchChartFromBinance(symbol, range);
+      if (points.length > 0) {
+        setCache(cacheKey, points, CHART_TTL);
+        return points;
+      }
+    } catch (err) {
+      console.warn(`[Chart] Binance klines failed for ${symbol}:`, err);
+    }
+  }
+
+  // For all assets, try Alpha Vantage (rate-limited)
   try {
     const points = await fetchPriceHistoryFromAV(symbol, range);
     if (points.length > 0) {
@@ -905,38 +1100,49 @@ export async function getFundamentals(symbol: string): Promise<AssetFundamentals
   if (cached) return cached;
 
   const assetClass = getAssetClass(symbol);
-  if (assetClass === "forex" || assetClass === "meme_coins") return null;
 
-  try {
-    const data = await fetchFundamentalsFromAV(symbol);
-    if (data) {
-      setCache(cacheKey, data, PRICE_TTL);
-      return data;
-    }
-  } catch { /* fallback */ }
-
-  // For crypto, fetch from CoinGecko
-  if (assetClass === "crypto") {
+  // For stocks/ETFs/commodities: use Alpha Vantage OVERVIEW
+  if (assetClass === "stocks" || assetClass === "sp500" || assetClass === "commodities") {
     try {
-      const headers: Record<string, string> = { Accept: "application/json" };
-      if (COINGECKO_KEY) headers["x-cg-pro-api-key"] = COINGECKO_KEY;
-      const idMap: Record<string, string> = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", XRP: "ripple", ADA: "cardano", DOGE: "dogecoin" };
-      const coinId = idMap[symbol];
-      if (!coinId) return null;
-
-      const res = await fetch(`https://api.coingecko.com/api/v3/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`, { headers });
-      if (!res.ok) return null;
-      const d = await res.json();
-
-      const fundamentals: AssetFundamentals = {
-        marketCap: d.market_data?.market_cap?.usd,
-        circulatingSupply: d.market_data?.circulating_supply,
-        totalSupply: d.market_data?.total_supply,
-        allTimeHigh: d.market_data?.ath?.usd,
-      };
-      setCache(cacheKey, fundamentals, PRICE_TTL);
-      return fundamentals;
+      const data = await fetchFundamentalsFromAV(symbol);
+      if (data) { setCache(cacheKey, data, PRICE_TTL); return data; }
     } catch { /* fallback */ }
+  }
+
+  // For crypto/meme_coins: use Binance 24hr ticker for volume/high/low
+  if (assetClass === "crypto" || assetClass === "meme_coins") {
+    try {
+      const binanceSym = `${symbol}USDT`;
+      const res = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${binanceSym}`);
+      if (res.ok) {
+        const d = await res.json();
+        const fundamentals: AssetFundamentals = {
+          volume24h: parseFloat(d.quoteVolume || 0),
+        };
+        // Try to get market cap from CoinGecko as enrichment
+        const idMap: Record<string, string> = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", XRP: "ripple", ADA: "cardano", DOGE: "dogecoin" };
+        const coinId = idMap[symbol];
+        if (coinId) {
+          try {
+            const cgRes = await fetch(`https://api.coingecko.com/api/v3/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`);
+            if (cgRes.ok) {
+              const cg = await cgRes.json();
+              if (cg.market_data) {
+                fundamentals.marketCap = cg.market_data.market_cap?.usd;
+                fundamentals.circulatingSupply = cg.market_data.circulating_supply;
+                fundamentals.totalSupply = cg.market_data.total_supply;
+                fundamentals.allTimeHigh = cg.market_data.ath?.usd;
+              }
+            }
+          } catch { /* CoinGecko enrichment optional */ }
+        }
+        // Only return if we have at least some data
+        if (fundamentals.volume24h || fundamentals.marketCap) {
+          setCache(cacheKey, fundamentals, PRICE_TTL);
+          return fundamentals;
+        }
+      }
+    } catch { /* Binance fundamentals optional */ }
   }
 
   return null;

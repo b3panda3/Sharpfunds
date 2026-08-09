@@ -165,7 +165,6 @@ export default function AssetInsights() {
   useEffect(() => {
     if (!symbol || !asset) return;
     const sym: string = symbol;
-    const curAsset: MarketMover = asset;
     let cancelled = false;
 
     async function loadChart() {
